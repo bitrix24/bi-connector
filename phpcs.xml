@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<ruleset name="BiConnector">
+    <description>Coding standard for Bitrix24 BI Connector Extension</description>
+
+    <!-- Show progress -->
+    <arg value="p"/>
+
+    <!-- Use colors -->
+    <arg name="colors"/>
+
+    <!-- Check these files and directories -->
+    <file>src</file>
+    <file>tests</file>
+
+    <!-- Use PSR-12 standard -->
+    <rule ref="PSR12"/>
+
+    <!-- Exclude vendor directory -->
+    <exclude-pattern>vendor/*</exclude-pattern>
+
+    <!-- Allow long lines in tests -->
+    <rule ref="Generic.Files.LineLength">
+        <exclude-pattern>tests/*</exclude-pattern>
+    </rule>
+</ruleset>
+

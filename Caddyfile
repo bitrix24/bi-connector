@@ -1,0 +1,48 @@
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+    root * /app/public
+
+    # Handle directory requests and index files
+    @notFile {
+        not file
+    }
+
+    # Serve static files first
+    file_server {
+        index index.php
+    }
+
+    # Handle PHP files and directory requests
+    @phpOrDir {
+        path *.php
+        path */
+    }
+
+    # Rewrite directory requests to index.php
+    rewrite @notFile /index.php
+
+    # Enable PHP processing with FrankenPHP
+    php
+
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+    }
+
+    # Logging
+    log {
+        output file /var/log/access.log
+        format json
+    }
+
+    # Error handling
+    handle_errors {
+        respond "Error {http.error.status_code}: {http.error.status_text}"
+    }
+}

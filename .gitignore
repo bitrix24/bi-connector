@@ -1,0 +1,39 @@
+# Dependencies
+/vendor/
+composer.lock
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Cache and logs
+/cache/
+/logs/
+*.log
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+/tests/logs/
+.phpunit.cache/
+coverage/
+
+# Docker
+docker-compose.override.yml
+
+# Config files with sensitive data
+/config/
+
+/docs/
+/examples/
+
+nul

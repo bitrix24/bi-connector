@@ -1,0 +1,50 @@
+FROM php:8.4-cli
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    libcurl4-openssl-dev \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    zip \
+    unzip \
+    libicu-dev \
+    libpq-dev \
+    default-mysql-client \
+    postgresql-client \
+    && docker-php-ext-configure intl \
+    && docker-php-ext-install intl bcmath curl pdo pdo_mysql pdo_pgsql \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Set working directory
+WORKDIR /app
+
+# Copy composer files
+COPY composer.json composer.lock ./
+
+# Install PHP dependencies (including dev dependencies for testing)
+RUN composer install --optimize-autoloader
+
+# Copy application code
+COPY . .
+
+# Create necessary directories
+RUN mkdir -p /app/cache /app/config /var/log && \
+    chmod 755 /app/cache /app/config /var/log
+
+# Set proper permissions
+RUN chown -R www-data:www-data /app /var/log
+
+# Switch to www-data user for security
+USER www-data
+
+# Override entrypoint to prevent FrankenPHP from starting
+ENTRYPOINT []
+
+# Default command (will be overridden by docker-compose)
+CMD ["php", "-v"]

@@ -1,0 +1,88 @@
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./public:/app/public
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./logs:/var/log
+      - ./.env:/app/.env
+      - ./vendor:/app/vendor
+      - ./composer.json:/app/composer.json
+      - ./composer.lock:/app/composer.lock
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+    restart: unless-stopped
+    networks:
+      - biconnector
+      - shared_db_network
+
+  # Service for running tests
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: vendor/bin/phpunit
+    environment:
+      - APP_ENV=testing
+    networks:
+      - biconnector
+    profiles:
+      - test
+
+  # Service for running PHPStan
+  phpstan:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: vendor/bin/phpstan analyse src --level=8 --memory-limit=512M
+    networks:
+      - biconnector
+    profiles:
+      - lint
+
+  # Service for running PHP_CodeSniffer
+  phpcs:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: vendor/bin/phpcs src --standard=PSR12
+    networks:
+      - biconnector
+    profiles:
+      - lint
+
+  # Service for auto-fixing code style
+  phpcbf:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: vendor/bin/phpcbf src --standard=PSR12
+    networks:
+      - biconnector
+    profiles:
+      - lint
+
+networks:
+  biconnector:
+    driver: bridge
+  shared_db_network:
+    external: true
