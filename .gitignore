@@ -1,6 +1,5 @@
 # Dependencies
 /vendor/
-composer.lock
 
 # Environment files
 .env
