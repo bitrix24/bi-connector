@@ -9,7 +9,7 @@
 
 ### 2. **Makefile Commands**
 - Updated commands `start`, `restart`, `rebuild`
-- Added automatic network check and creation before startup (with `findstr` for Windows)
+- Added automatic network check and creation before startup
 - Command `create-shared-network` to create network if needed
 
 ### 3. **Entrypoint Script**

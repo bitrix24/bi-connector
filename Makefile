@@ -24,7 +24,7 @@ build: ## Build Docker image
 start: ## Start application in development mode
 	@echo "$(GREEN)🚀 Starting application...$(NC)"
 	@echo "$(BLUE)📡 Ensuring shared_db_network exists...$(NC)"
-	@docker network ls | findstr shared_db_network > nul 2>&1 || docker network create shared_db_network
+	@docker network inspect shared_db_network >/dev/null 2>&1 || docker network create shared_db_network
 	docker-compose up -d
 	@echo "$(GREEN)✅ Application started at http://localhost:8080$(NC)"
 	@echo "$(GREEN)🌐 Container is connected to shared_db_network$(NC)"
@@ -37,7 +37,7 @@ restart: ## Restart application with rebuild
 	@echo "$(YELLOW)🔄 Restarting application...$(NC)"
 	docker-compose down
 	@echo "$(BLUE)📡 Ensuring shared_db_network exists...$(NC)"
-	@docker network ls | findstr shared_db_network > nul 2>&1 || docker network create shared_db_network
+	@docker network inspect shared_db_network >/dev/null 2>&1 || docker network create shared_db_network
 	docker-compose up -d --build
 	@echo "$(GREEN)✅ Application restarted$(NC)"
 	@echo "$(GREEN)🌐 Container is connected to shared_db_network$(NC)"
@@ -172,7 +172,7 @@ list-networks: ## List Docker networks
 
 create-shared-network: ## Create shared_db_network if it doesn't exist
 	@echo "$(BLUE)🌐 Creating shared_db_network...$(NC)"
-	@docker network ls | findstr shared_db_network > nul 2>&1 || docker network create shared_db_network
+	@docker network inspect shared_db_network >/dev/null 2>&1 || docker network create shared_db_network
 	@echo "$(GREEN)✅ Network shared_db_network is ready$(NC)"
 
 check-db-connectivity: ## Run comprehensive database connectivity check
@@ -215,7 +215,7 @@ rebuild: ## Full rebuild (clean + build + start)
 	@echo "$(YELLOW)🔄 Full rebuild...$(NC)"
 	$(MAKE) clean
 	@echo "$(BLUE)📡 Ensuring shared_db_network exists...$(NC)"
-	@docker network ls | findstr shared_db_network > nul 2>&1 || docker network create shared_db_network
+	@docker network inspect shared_db_network >/dev/null 2>&1 || docker network create shared_db_network
 	$(MAKE) build
 	$(MAKE) start
 
