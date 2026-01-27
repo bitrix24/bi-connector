@@ -18,6 +18,14 @@ chown -R www-data:www-data /app/cache
 mkdir -p /app/config
 chown -R www-data:www-data /app/config
 
+# Install Composer dependencies if vendor directory is empty or autoload.php is missing
+if [ ! -f "/app/vendor/autoload.php" ]; then
+    echo "📦 Installing Composer dependencies..."
+    cd /app
+    composer install --no-interaction --optimize-autoloader
+    echo "✅ Dependencies installed successfully"
+fi
+
 # Set proper permissions for application
 chown -R www-data:www-data /app
 
