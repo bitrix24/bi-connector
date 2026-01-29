@@ -119,7 +119,8 @@ class Application
         $connectorsToRegister = [
             [
                 'title' => 'MySQL Database Connector',
-                'logo' => self::getMySQLLogo(),
+                // 'logo' => self::getMySQLLogo(),
+                'logo' => $appDomain . '/assets/img/logo_mysql.png',
                 'description' => 'Connector for MySQL databases with authentication',
                 'urlCheck' => $appDomain . '/?connection_type=mysql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=mysql&action=table_list',
@@ -137,7 +138,8 @@ class Application
             ],
             [
                 'title' => 'PostgreSQL Database Connector',
-                'logo' => self::getPostgreSQLLogo(),
+                // 'logo' => self::getPostgreSQLLogo(),
+                'logo' => $appDomain . '/assets/img/logo_pgsql.png',
                 'description' => 'Connector for PostgreSQL databases with authentication',
                 'urlCheck' => $appDomain . '/?connection_type=postgresql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=postgresql&action=table_list',
@@ -289,7 +291,6 @@ class Application
      */
     private static function getMySQLLogo(): string
     {
-        // Simple MySQL-like logo in base64
         return 'data:image/png;base64,'
             . 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR'
             . '42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
@@ -300,7 +301,6 @@ class Application
      */
     private static function getPostgreSQLLogo(): string
     {
-        // Simple PostgreSQL-like logo in base64
         return 'data:image/png;base64,'
             . 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42m'
             . 'NkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';

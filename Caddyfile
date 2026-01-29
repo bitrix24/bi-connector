@@ -1,32 +1,35 @@
 {
-	auto_https off
-	admin off
+    auto_https off
+    admin off
 }
 
 :80 {
     root * /app/public
 
-    # Handle directory requests and index files
-    @notFile {
-        not file
+    # Serve static files (images, css, js, etc.) directly
+    @static {
+        path *.ico *.css *.js *.gif *.jpg *.jpeg *.png *.svg *.webp *.woff *.woff2 *.ttf *.eot
+    }
+    handle @static {
+        file_server
     }
 
-    # Serve static files first
-    file_server {
-        index index.php
-    }
-
-    # Handle PHP files and directory requests
-    @phpOrDir {
+    # Handle PHP files directly
+    @phpFiles {
         path *.php
-        path */
+    }
+    handle @phpFiles {
+        php
     }
 
-    # Rewrite directory requests to index.php
-    rewrite @notFile /index.php
-
-    # Enable PHP processing with FrankenPHP
-    php
+    # For all other requests, try file first, then rewrite to index.php
+    handle {
+        @notFile {
+            not file
+        }
+        rewrite @notFile /index.php
+        php
+    }
 
     # Security headers
     header {
