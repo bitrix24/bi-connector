@@ -115,12 +115,19 @@ class Application
         // Get application domain with fallback
         $appDomain = $_ENV['APP_DOMAIN'] ?? 'https://localhost';
 
+        $appDir = realpath(__DIR__ . '/..');
+        $mySqlLogoPublicPath = '/assets/img/logo_mysql.png';
+        $pgSqlLogoPublicPath = '/assets/img/logo_pgsql.png';
+        $mySqlLogoAbsPath = $appDir . '/public' . $mySqlLogoPublicPath;
+        $pgSqlLogoAbsPath = $appDir . '/public' . $pgSqlLogoPublicPath;
+
         // Prepare connector configurations
         $connectorsToRegister = [
             [
                 'title' => 'MySQL Database Connector',
-                // 'logo' => self::getMySQLLogo(),
-                'logo' => $appDomain . '/assets/img/logo_mysql.png',
+                // 'logo' => $appDomain . $mySqlLogoPublicPath,
+                // 'logo' => self::getMySqlPngLogoBase64Data(),
+                'logo' => self::getPngLogoBase64Data($mySqlLogoAbsPath),
                 'description' => 'Connector for MySQL databases with authentication',
                 'urlCheck' => $appDomain . '/?connection_type=mysql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=mysql&action=table_list',
@@ -138,8 +145,9 @@ class Application
             ],
             [
                 'title' => 'PostgreSQL Database Connector',
-                // 'logo' => self::getPostgreSQLLogo(),
-                'logo' => $appDomain . '/assets/img/logo_pgsql.png',
+                // 'logo' => $appDomain . $pgSqlLogoPublicPath,
+                // 'logo' => self::getPgSqlPngLogoBase64Data(),
+                'logo' => self::getPngLogoBase64Data($pgSqlLogoAbsPath),
                 'description' => 'Connector for PostgreSQL databases with authentication',
                 'urlCheck' => $appDomain . '/?connection_type=postgresql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=postgresql&action=table_list',
@@ -287,9 +295,9 @@ class Application
     }
 
     /**
-     * Get MySQL logo as base64 encoded image
+     * Get MySQL PNG logo as base64 encoded image
      */
-    private static function getMySQLLogo(): string
+    private static function getMySqlPngLogoBase64Data(): string
     {
         return 'data:image/png;base64,'
             . 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR'
@@ -297,13 +305,33 @@ class Application
     }
 
     /**
-     * Get PostgreSQL logo as base64 encoded image
+     * Get PostgreSQL PNG logo as base64 encoded image
      */
-    private static function getPostgreSQLLogo(): string
+    private static function getPgSqlPngLogoBase64Data(): string
     {
         return 'data:image/png;base64,'
             . 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42m'
             . 'NkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    }
+
+    /**
+     * Get PNG logo as base64 encoded image
+     */
+    private static function getPngLogoBase64Data(string $imgPath = ''): string
+    {
+        $imgBase64Data = 'data:image/png;base64,'
+            . 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR'
+            . '42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+        if (!empty($imgPath)) {
+            $imgData = file_get_contents($imgPath);
+            if ($imgData !== false) {
+                $base64 = base64_encode($imgData);
+                $imgBase64Data = 'data:image/png;base64,' . $base64;
+            }
+        }
+
+        return $imgBase64Data;
     }
 
     /**
