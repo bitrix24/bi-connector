@@ -121,14 +121,18 @@ class Application
         $mySqlLogoAbsPath = $appDir . '/public' . $mySqlLogoPublicPath;
         $pgSqlLogoAbsPath = $appDir . '/public' . $pgSqlLogoPublicPath;
 
+        $mysqlConnectorTitle = 'MySQL Database Connector';
+        $postgresqlConnectorTitle = 'PostgreSQL Database Connector';
+        $mysqlConnectorDefaultDescription = 'Connector for MySQL databases with authentication';
+        $postgresqlConnectorDescription = 'Connector for PostgreSQL databases with authentication';
+
         // Prepare connector configurations
         $connectorsToRegister = [
             [
-                'title' => 'MySQL Database Connector',
+                'title' => $_ENV['MYSQL_CONNECTOR_TITLE'] ?? $mysqlConnectorTitle,
                 // 'logo' => $appDomain . $mySqlLogoPublicPath,
-                // 'logo' => self::getMySqlPngLogoBase64Data(),
                 'logo' => self::getPngLogoBase64Data($mySqlLogoAbsPath),
-                'description' => 'Connector for MySQL databases with authentication',
+                'description' => $_ENV['MYSQL_CONNECTOR_DESCRIPTION'] ?? $mysqlConnectorDefaultDescription,
                 'urlCheck' => $appDomain . '/?connection_type=mysql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=mysql&action=table_list',
                 'urlTableDescription' => $appDomain
@@ -144,11 +148,10 @@ class Application
                 'sort' => 100
             ],
             [
-                'title' => 'PostgreSQL Database Connector',
+                'title' => $_ENV['POSTGRESQL_CONNECTOR_TITLE'] ?? $postgresqlConnectorTitle,
                 // 'logo' => $appDomain . $pgSqlLogoPublicPath,
-                // 'logo' => self::getPgSqlPngLogoBase64Data(),
                 'logo' => self::getPngLogoBase64Data($pgSqlLogoAbsPath),
-                'description' => 'Connector for PostgreSQL databases with authentication',
+                'description' => $_ENV['POSTGRESQL_CONNECTOR_DESCRIPTION'] ?? $postgresqlConnectorDescription,
                 'urlCheck' => $appDomain . '/?connection_type=postgresql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=postgresql&action=table_list',
                 'urlTableDescription' => $appDomain
@@ -167,7 +170,11 @@ class Application
 
         // Register or update connectors
         foreach ($connectorsToRegister as $connectorData) {
-            $existingConnectorId = self::getExistingConnectorId($existingConnectors, $connectorData['title']);
+            $existingConnectorId = self::getExistingConnectorId(
+                $existingConnectors,
+                $connectorData['title'],
+                $connectorData['description']
+            );
             if ($existingConnectorId === null) {
                 self::registerConnectorViaAPI($domain, $accessToken, $connectorData);
             } else {
@@ -216,12 +223,23 @@ class Application
     }
 
     /**
-     * Get existing connector ID by title
+     * Get existing connector ID by title or description
      */
-    private static function getExistingConnectorId(array $existingConnectors, string $title): ?int
-    {
+    private static function getExistingConnectorId(
+        array $existingConnectors,
+        string $title,
+        string $description = ''
+    ): ?int {
         foreach ($existingConnectors as $connector) {
+            // Check by title
             if (isset($connector['title']) && $connector['title'] === $title) {
+                return $connector['id'] ?? null;
+            }
+            // Check by description if provided
+            if (
+                !empty($description) && isset($connector['description'])
+                && $connector['description'] === $description
+            ) {
                 return $connector['id'] ?? null;
             }
         }
@@ -292,26 +310,6 @@ class Application
             'httpCode' => $httpCode,
             'response' => $response
         ]);
-    }
-
-    /**
-     * Get MySQL PNG logo as base64 encoded image
-     */
-    private static function getMySqlPngLogoBase64Data(): string
-    {
-        return 'data:image/png;base64,'
-            . 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR'
-            . '42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
-    }
-
-    /**
-     * Get PostgreSQL PNG logo as base64 encoded image
-     */
-    private static function getPgSqlPngLogoBase64Data(): string
-    {
-        return 'data:image/png;base64,'
-            . 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42m'
-            . 'NkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
     }
 
     /**
