@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Unit;
 
 use App\BiConnector;
+use App\DataSource\DataSourceInterface;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Response;
@@ -33,96 +34,66 @@ class BiConnectorTest extends TestCase
         $this->assertInstanceOf(BiConnector::class, $connector);
     }
 
-    public function testMapMySQLTypeToBitrix(): void
+    public function testTableListQueriesTheDataSourceOnCacheMissOnly(): void
     {
-        $connector = new BiConnector($this->connectionParams, 'mysql', $this->logger);
+        $connectionParams = $this->uniqueConnectionParams();
+        $tables = [['code' => 'orders', 'title' => 'orders']];
 
-        $reflection = new \ReflectionClass($connector);
-        $method = $reflection->getMethod('mapMySQLTypeToBitrix');
-        $method->setAccessible(true);
+        $missDataSource = $this->createMock(DataSourceInterface::class);
+        $missDataSource
+            ->expects($this->once())
+            ->method('listTables')
+            ->with('')
+            ->willReturn($tables);
 
-        // Test integer types
-        $this->assertEquals('int', $method->invoke($connector, 'int(11)'));
-        $this->assertEquals('int', $method->invoke($connector, 'bigint(20)'));
-        $this->assertEquals('int', $method->invoke($connector, 'tinyint(1)'));
+        $hitDataSource = $this->createMock(DataSourceInterface::class);
+        $hitDataSource->expects($this->never())->method('listTables');
 
-        // Test float types
-        $this->assertEquals('double', $method->invoke($connector, 'float'));
-        $this->assertEquals('double', $method->invoke($connector, 'double'));
-        $this->assertEquals('double', $method->invoke($connector, 'decimal(10,2)'));
+        $missConnector = new BiConnector($connectionParams, 'mysql', $this->logger, $missDataSource);
+        $hitConnector = new BiConnector($connectionParams, 'mysql', $this->logger, $hitDataSource);
 
-        // Test date types
-        $this->assertEquals('date', $method->invoke($connector, 'date'));
-        $this->assertEquals('datetime', $method->invoke($connector, 'datetime'));
-        $this->assertEquals('datetime', $method->invoke($connector, 'timestamp'));
+        try {
+            $missResponse = $missConnector->tableList();
+            $hitResponse = $hitConnector->tableList();
 
-        // Test string types
-        $this->assertEquals('string', $method->invoke($connector, 'varchar(255)'));
-        $this->assertEquals('string', $method->invoke($connector, 'text'));
+            $this->assertSame(200, $missResponse->getStatusCode());
+            $this->assertSame(json_encode($tables), $missResponse->getContent());
+            $this->assertSame(200, $hitResponse->getStatusCode());
+            $this->assertSame($missResponse->getContent(), $hitResponse->getContent());
+        } finally {
+            $this->forgetCacheItem($missConnector, $this->cacheKey('table_list_', $connectionParams, ''));
+        }
     }
 
-    public function testMapPostgreSQLTypeToBitrix(): void
+    public function testTableDescriptionQueriesTheDataSourceOnCacheMissOnly(): void
     {
-        $connector = new BiConnector($this->connectionParams, 'postgresql', $this->logger);
+        $connectionParams = $this->uniqueConnectionParams();
+        $fields = [['code' => 'ID', 'name' => 'ID', 'type' => 'int']];
 
-        $reflection = new \ReflectionClass($connector);
-        $method = $reflection->getMethod('mapPostgreSQLTypeToBitrix');
-        $method->setAccessible(true);
+        $missDataSource = $this->createMock(DataSourceInterface::class);
+        $missDataSource
+            ->expects($this->once())
+            ->method('describeTable')
+            ->with('orders')
+            ->willReturn($fields);
 
-        // Test integer types
-        $this->assertEquals('int', $method->invoke($connector, 'integer'));
-        $this->assertEquals('int', $method->invoke($connector, 'bigint'));
-        $this->assertEquals('int', $method->invoke($connector, 'serial'));
+        $hitDataSource = $this->createMock(DataSourceInterface::class);
+        $hitDataSource->expects($this->never())->method('describeTable');
 
-        // Test float types
-        $this->assertEquals('double', $method->invoke($connector, 'real'));
-        $this->assertEquals('double', $method->invoke($connector, 'double precision'));
-        $this->assertEquals('double', $method->invoke($connector, 'numeric'));
+        $missConnector = new BiConnector($connectionParams, 'mysql', $this->logger, $missDataSource);
+        $hitConnector = new BiConnector($connectionParams, 'mysql', $this->logger, $hitDataSource);
 
-        // Test date types
-        $this->assertEquals('date', $method->invoke($connector, 'date'));
-        $this->assertEquals('datetime', $method->invoke($connector, 'timestamp'));
-        $this->assertEquals('datetime', $method->invoke($connector, 'timestamp with time zone'));
+        try {
+            $missResponse = $missConnector->tableDescription('orders');
+            $hitResponse = $hitConnector->tableDescription('orders');
 
-        // Test string types
-        $this->assertEquals('string', $method->invoke($connector, 'character varying'));
-        $this->assertEquals('string', $method->invoke($connector, 'text'));
-    }
-
-    public function testBuildDsn(): void
-    {
-        $connector = new BiConnector($this->connectionParams, 'mysql', $this->logger);
-
-        $reflection = new \ReflectionClass($connector);
-        $method = $reflection->getMethod('buildDsn');
-        $method->setAccessible(true);
-
-        // Test MySQL DSN
-        $mysqlDsn = $method->invoke($connector, 'mysql');
-        $this->assertStringContainsString('mysql://', $mysqlDsn);
-        $this->assertStringContainsString('localhost', $mysqlDsn);
-        $this->assertStringContainsString('3306', $mysqlDsn);
-        $this->assertStringContainsString('test_db', $mysqlDsn);
-
-        // Test PostgreSQL DSN
-        $pgDsn = $method->invoke($connector, 'postgresql');
-        $this->assertStringContainsString('postgresql://', $pgDsn);
-        $this->assertStringContainsString('localhost', $pgDsn);
-        $this->assertStringContainsString('test_db', $pgDsn);
-    }
-
-    public function testBuildDsnWithInvalidType(): void
-    {
-        $connector = new BiConnector($this->connectionParams, 'mysql', $this->logger);
-
-        $reflection = new \ReflectionClass($connector);
-        $method = $reflection->getMethod('buildDsn');
-        $method->setAccessible(true);
-
-        $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('Unsupported connection type: invalid');
-
-        $method->invoke($connector, 'invalid');
+            $this->assertSame(200, $missResponse->getStatusCode());
+            $this->assertSame(json_encode($fields), $missResponse->getContent());
+            $this->assertSame(200, $hitResponse->getStatusCode());
+            $this->assertSame($missResponse->getContent(), $hitResponse->getContent());
+        } finally {
+            $this->forgetCacheItem($missConnector, $this->cacheKey('table_desc_', $connectionParams, 'orders'));
+        }
     }
 
     public function testCacheDirectoryInitialization(): void
@@ -188,5 +159,28 @@ class BiConnectorTest extends TestCase
         $responseData = json_decode($response->getContent(), true);
         $this->assertArrayHasKey('error', $responseData);
         $this->assertEquals('Table name is required', $responseData['error']);
+    }
+
+    /**
+     * Connection parameters nobody else has used, so that the catalog cache starts out cold.
+     */
+    private function uniqueConnectionParams(): array
+    {
+        $connectionParams = $this->connectionParams;
+        $connectionParams['database'] = 'cache_probe_' . uniqid('', true);
+
+        return $connectionParams;
+    }
+
+    private function cacheKey(string $prefix, array $connectionParams, string $suffix): string
+    {
+        return $prefix . md5(json_encode($connectionParams) . 'mysql' . $suffix);
+    }
+
+    private function forgetCacheItem(BiConnector $connector, string $cacheKey): void
+    {
+        $property = new \ReflectionProperty($connector, 'cache');
+        $property->setAccessible(true);
+        $property->getValue($connector)->deleteItem($cacheKey);
     }
 }

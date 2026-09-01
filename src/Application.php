@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App;
 
+use App\Log\SecretMaskingProcessor;
 use Bitrix24\SDK\Application\Local\Entity\LocalAppAuth;
 use Bitrix24\SDK\Application\Local\Infrastructure\Filesystem\AppAuthFileStorage;
 use Bitrix24\SDK\Application\Local\Repository\LocalAppAuthRepositoryInterface;
@@ -373,6 +374,7 @@ class Application
             $logger->pushHandler($rotatingFileHandler);
             $logger->pushProcessor(new MemoryUsageProcessor(true, true));
             $logger->pushProcessor(new UidProcessor());
+            $logger->pushProcessor(new SecretMaskingProcessor());
         }
 
         return $logger;
