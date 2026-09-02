@@ -23,6 +23,32 @@ services:
       - biconnector
       - shared_db_network
 
+  # ClickHouse source used by the integration test suite
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    ports:
+      # Bound to the loopback interface: the source is reachable from the host test run only.
+      # The published port is not the ClickHouse default one, which a local source of a developer
+      # commonly holds already; override it with CLICKHOUSE_HOST_PORT when 8124 is taken as well.
+      - "127.0.0.1:${CLICKHOUSE_HOST_PORT:-8124}:8123"
+    environment:
+      - CLICKHOUSE_DB=bi_test
+      - CLICKHOUSE_USER=bi_test
+      - CLICKHOUSE_PASSWORD=bi_test_password
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - biconnector
+    profiles:
+      - test
+
   # Service for running tests
   test:
     build:

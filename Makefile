@@ -158,6 +158,10 @@ check-postgres: ## Check PostgreSQL database connection (usage: make check-postg
 	@echo "$(BLUE)🔍 Checking PostgreSQL connection to $(HOST)...$(NC)"
 	docker-compose exec app psql -h $(HOST) -U postgres -c "SELECT 1;"
 
+check-clickhouse: ## Check ClickHouse connection (usage: make check-clickhouse HOST=clickhouse PORT=8123 DATABASE=db USERNAME=user PASSWORD=secret)
+	@echo "$(BLUE)🔍 Checking ClickHouse connection to $(HOST)...$(NC)"
+	docker-compose exec app bash /app/scripts/test_clickhouse.sh $(HOST) $(PORT) $(DATABASE) $(USERNAME) $(PASSWORD)
+
 ping-db: ## Ping database host (usage: make ping-db HOST=container_name)
 	@echo "$(BLUE)🏓 Pinging $(HOST)...$(NC)"
 	docker-compose exec app ping -c 3 $(HOST)

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\DataSource;
 
+use App\DataSource\ClickHouse\ClickHouseDataSource;
 use App\DataSource\Dbal\DbalDataSource;
 use Psr\Log\LoggerInterface;
 
@@ -42,9 +43,7 @@ final class DataSourceFactory
         return match ($type) {
             ConnectionType::Mysql,
             ConnectionType::Postgresql => new DbalDataSource($connectionParams, $type, $this->logger),
-            default => throw new \RuntimeException(
-                sprintf('No data source implementation is registered for connection type "%s"', $type->value)
-            )
+            ConnectionType::Clickhouse => new ClickHouseDataSource($connectionParams, $this->logger),
         };
     }
 }
