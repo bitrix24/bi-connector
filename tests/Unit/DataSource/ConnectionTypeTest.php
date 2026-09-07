@@ -26,6 +26,47 @@ class ConnectionTypeTest extends TestCase
         $this->assertNull(ConnectionType::tryFrom('mssql'));
     }
 
+    /**
+     * @return list<array{0: ConnectionType, 1: string}>
+     */
+    public static function sourceCodeProvider(): array
+    {
+        return [
+            'mysql keeps its spelling' => [ConnectionType::Mysql, 'mysql'],
+            'postgresql is filed under the shorter portal name' => [ConnectionType::Postgresql, 'pgsql'],
+            'clickhouse keeps its spelling' => [ConnectionType::Clickhouse, 'clickhouse'],
+        ];
+    }
+
+    #[DataProvider('sourceCodeProvider')]
+    public function testEveryCaseMapsToItsPortalSourceCode(ConnectionType $type, string $expected): void
+    {
+        $this->assertSame($expected, $type->sourceCode());
+    }
+
+    /**
+     * The two vocabularies only look alike, so the request value is never reused as the portal one.
+     */
+    public function testPostgresqlDoesNotMapToItself(): void
+    {
+        $this->assertNotSame(
+            ConnectionType::Postgresql->value,
+            ConnectionType::Postgresql->sourceCode(),
+            'The portal files PostgreSQL under "pgsql", not under the request value "postgresql"'
+        );
+    }
+
+    public function testEveryCaseHasASourceCodeAndTheyAreDistinct(): void
+    {
+        $sourceCodes = array_map(
+            static fn(ConnectionType $type): string => $type->sourceCode(),
+            ConnectionType::cases()
+        );
+
+        $this->assertNotContains('', $sourceCodes);
+        $this->assertSame($sourceCodes, array_unique($sourceCodes));
+    }
+
     public function testFactoryRejectsConnectionTypeOutsideTheEnum(): void
     {
         $this->expectException(\InvalidArgumentException::class);

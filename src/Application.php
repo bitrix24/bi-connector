@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
+use App\Connector\ConnectorApiClient;
+use App\DataSource\ConnectionType;
 use App\Log\SecretMaskingProcessor;
 use Bitrix24\SDK\Application\Local\Entity\LocalAppAuth;
 use Bitrix24\SDK\Application\Local\Infrastructure\Filesystem\AppAuthFileStorage;
@@ -30,10 +32,46 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 use Throwable;
 
+/**
+ * @phpstan-type ConnectorSetting array{name: string, type: string, code: string}
+ * @phpstan-type ConnectorDescription array{
+ *     title: string,
+ *     logo: string,
+ *     description: string,
+ *     urlCheck: string,
+ *     urlTableList: string,
+ *     urlTableDescription: string,
+ *     urlData: string,
+ *     settings: list<ConnectorSetting>,
+ *     sort: int,
+ *     sourceCode: string,
+ * }
+ */
 class Application
 {
     private const CONFIG_FILE_NAME = '/.env';
     private const LOG_FILE_NAME = '/application.log';
+
+    /**
+     * Names a portal only accepts once its module is new enough. Everything outside this list belongs to
+     * the set every version of the module has ever accepted.
+     *
+     * @var list<string>
+     */
+    private const FIELDS_OUTSIDE_BASE_SET = ['sourceCode'];
+
+    /**
+     * Settings every connector of the application asks the user for.
+     *
+     * @var list<ConnectorSetting>
+     */
+    private const CONNECTION_SETTINGS = [
+        ['name' => 'Host', 'type' => 'STRING', 'code' => 'host'],
+        ['name' => 'Port', 'type' => 'STRING', 'code' => 'port'],
+        ['name' => 'Database', 'type' => 'STRING', 'code' => 'database'],
+        ['name' => 'Username', 'type' => 'STRING', 'code' => 'username'],
+        ['name' => 'Password', 'type' => 'STRING', 'code' => 'password'],
+    ];
 
     /**
      * Processes the installation request from Bitrix24.
@@ -98,7 +136,7 @@ class Application
     }
 
     /**
-     * Register connectors using direct HTTP API calls
+     * Brings the connector catalogue of the portal in line with the descriptions of the application.
      */
     private static function registerConnectorsDirectly(mixed $auth): void
     {
@@ -110,207 +148,238 @@ class Application
         $accessToken = $auth->authToken->accessToken;
         $domain = $auth->domain;
 
-        // Get existing connectors first
-        $existingConnectors = self::getExistingConnectors($domain, $accessToken);
+        self::registerConnectors(new ConnectorApiClient($domain, $accessToken, self::getLog()));
+    }
 
-        // Get application domain with fallback
-        $appDomain = $_ENV['APP_DOMAIN'] ?? 'https://localhost';
+    /**
+     * Registers or updates every connector of the application through the given client.
+     *
+     * The composition of a description belongs here; the exchange with the portal belongs to the client.
+     */
+    private static function registerConnectors(ConnectorApiClient $apiClient): void
+    {
+        $connectorsToRegister = self::buildConnectorDescriptions();
+        $existingConnectors = $apiClient->getConnectors();
+
+        // A field the portal does not know fails the whole call and would take the connectors that do
+        // work down with it, so the accepted set is read before anything is sent.
+        $portalFieldNames = $apiClient->getSupportedFieldNames();
+
+        self::logFieldSetInUse($connectorsToRegister, $portalFieldNames);
+
+        foreach ($connectorsToRegister as $connectorData) {
+            $fields = self::selectFieldsKnownToPortal($connectorData, $portalFieldNames);
+            $existingConnectorId = self::getExistingConnectorId(
+                $existingConnectors,
+                $connectorData['title'],
+                $connectorData['description'],
+                $connectorData['sourceCode']
+            );
+
+            if ($existingConnectorId === null) {
+                $apiClient->addConnector($fields);
+            } else {
+                $apiClient->updateConnector($existingConnectorId, $fields);
+            }
+        }
+    }
+
+    /**
+     * Descriptions of every connector the application offers.
+     *
+     * @return list<ConnectorDescription>
+     */
+    private static function buildConnectorDescriptions(): array
+    {
+        $appDomain = self::readEnvString('APP_DOMAIN', 'https://localhost');
 
         $appDir = realpath(__DIR__ . '/..');
         $mySqlLogoPublicPath = '/assets/img/logo_mysql.png';
         $pgSqlLogoPublicPath = '/assets/img/logo_pgsql.png';
+        $clickHouseLogoPublicPath = '/assets/img/logo_clickhouse.png';
         $mySqlLogoAbsPath = $appDir . '/public' . $mySqlLogoPublicPath;
         $pgSqlLogoAbsPath = $appDir . '/public' . $pgSqlLogoPublicPath;
+        $clickHouseLogoAbsPath = $appDir . '/public' . $clickHouseLogoPublicPath;
 
         $mysqlConnectorTitle = 'MySQL Database Connector';
         $postgresqlConnectorTitle = 'PostgreSQL Database Connector';
+        $clickhouseConnectorTitle = 'ClickHouse Database Connector';
         $mysqlConnectorDefaultDescription = 'Connector for MySQL databases with authentication';
         $postgresqlConnectorDescription = 'Connector for PostgreSQL databases with authentication';
+        $clickhouseConnectorDescription = 'Connector for ClickHouse databases with authentication';
 
-        // Prepare connector configurations
-        $connectorsToRegister = [
+        return [
             [
-                'title' => $_ENV['MYSQL_CONNECTOR_TITLE'] ?? $mysqlConnectorTitle,
-                // 'logo' => $appDomain . $mySqlLogoPublicPath,
+                'title' => self::readEnvString('MYSQL_CONNECTOR_TITLE', $mysqlConnectorTitle),
                 'logo' => self::getPngLogoBase64Data($mySqlLogoAbsPath),
-                'description' => $_ENV['MYSQL_CONNECTOR_DESCRIPTION'] ?? $mysqlConnectorDefaultDescription,
+                'description' => self::readEnvString(
+                    'MYSQL_CONNECTOR_DESCRIPTION',
+                    $mysqlConnectorDefaultDescription
+                ),
                 'urlCheck' => $appDomain . '/?connection_type=mysql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=mysql&action=table_list',
                 'urlTableDescription' => $appDomain
                     . '/?connection_type=mysql&action=table_description',
                 'urlData' => $appDomain . '/?connection_type=mysql&action=data',
-                'settings' => [
-                    ['name' => 'Host', 'type' => 'STRING', 'code' => 'host'],
-                    ['name' => 'Port', 'type' => 'STRING', 'code' => 'port'],
-                    ['name' => 'Database', 'type' => 'STRING', 'code' => 'database'],
-                    ['name' => 'Username', 'type' => 'STRING', 'code' => 'username'],
-                    ['name' => 'Password', 'type' => 'STRING', 'code' => 'password']
-                ],
-                'sort' => 100
+                'settings' => self::CONNECTION_SETTINGS,
+                'sort' => 100,
+                'sourceCode' => ConnectionType::Mysql->sourceCode(),
             ],
             [
-                'title' => $_ENV['POSTGRESQL_CONNECTOR_TITLE'] ?? $postgresqlConnectorTitle,
-                // 'logo' => $appDomain . $pgSqlLogoPublicPath,
+                'title' => self::readEnvString('POSTGRESQL_CONNECTOR_TITLE', $postgresqlConnectorTitle),
                 'logo' => self::getPngLogoBase64Data($pgSqlLogoAbsPath),
-                'description' => $_ENV['POSTGRESQL_CONNECTOR_DESCRIPTION'] ?? $postgresqlConnectorDescription,
+                'description' => self::readEnvString(
+                    'POSTGRESQL_CONNECTOR_DESCRIPTION',
+                    $postgresqlConnectorDescription
+                ),
                 'urlCheck' => $appDomain . '/?connection_type=postgresql&action=check',
                 'urlTableList' => $appDomain . '/?connection_type=postgresql&action=table_list',
                 'urlTableDescription' => $appDomain
                     . '/?connection_type=postgresql&action=table_description',
                 'urlData' => $appDomain . '/?connection_type=postgresql&action=data',
-                'settings' => [
-                    ['name' => 'Host', 'type' => 'STRING', 'code' => 'host'],
-                    ['name' => 'Port', 'type' => 'STRING', 'code' => 'port'],
-                    ['name' => 'Database', 'type' => 'STRING', 'code' => 'database'],
-                    ['name' => 'Username', 'type' => 'STRING', 'code' => 'username'],
-                    ['name' => 'Password', 'type' => 'STRING', 'code' => 'password']
-                ],
-                'sort' => 200
-            ]
+                'settings' => self::CONNECTION_SETTINGS,
+                'sort' => 200,
+                'sourceCode' => ConnectionType::Postgresql->sourceCode(),
+            ],
+            [
+                'title' => self::readEnvString('CLICKHOUSE_CONNECTOR_TITLE', $clickhouseConnectorTitle),
+                'logo' => self::getPngLogoBase64Data($clickHouseLogoAbsPath),
+                'description' => self::readEnvString(
+                    'CLICKHOUSE_CONNECTOR_DESCRIPTION',
+                    $clickhouseConnectorDescription
+                ),
+                'urlCheck' => $appDomain . '/?connection_type=clickhouse&action=check',
+                'urlTableList' => $appDomain . '/?connection_type=clickhouse&action=table_list',
+                'urlTableDescription' => $appDomain
+                    . '/?connection_type=clickhouse&action=table_description',
+                'urlData' => $appDomain . '/?connection_type=clickhouse&action=data',
+                'settings' => self::CONNECTION_SETTINGS,
+                'sort' => 300,
+                'sourceCode' => ConnectionType::Clickhouse->sourceCode(),
+            ],
         ];
-
-        // Register or update connectors
-        foreach ($connectorsToRegister as $connectorData) {
-            $existingConnectorId = self::getExistingConnectorId(
-                $existingConnectors,
-                $connectorData['title'],
-                $connectorData['description']
-            );
-            if ($existingConnectorId === null) {
-                self::registerConnectorViaAPI($domain, $accessToken, $connectorData);
-            } else {
-                self::updateConnectorViaAPI($domain, $accessToken, $existingConnectorId, $connectorData);
-            }
-        }
     }
 
     /**
-     * Get list of existing connectors from Bitrix24
+     * Narrows a connector description down to the field names the portal accepts.
+     *
+     * @param array<string, mixed> $connectorData
+     * @param list<string>|null $portalFieldNames names the portal knows, null when they could not be read
+     *
+     * @return array<string, mixed>
      */
-    private static function getExistingConnectors(string $domain, string $accessToken): array
+    private static function selectFieldsKnownToPortal(array $connectorData, ?array $portalFieldNames): array
     {
-        $url = "https://{$domain}/rest/biconnector.connector.list";
-
-        $postData = [
-            'auth' => $accessToken
-        ];
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($postData));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        self::getLog()->info('Application.getExistingConnectors', [
-            'httpCode' => $httpCode,
-            'response' => $response
-        ]);
-
-        if ($httpCode === 200 && $response) {
-            if (is_string($response)) {
-                $decodedResponse = json_decode($response, true);
-                if (isset($decodedResponse['result'])) {
-                    return $decodedResponse['result'];
-                }
-            }
+        if ($portalFieldNames === null) {
+            // Nothing is known about the portal, so only the set every version has accepted goes out.
+            return array_diff_key($connectorData, array_flip(self::FIELDS_OUTSIDE_BASE_SET));
         }
 
-        return [];
+        return array_intersect_key($connectorData, array_flip($portalFieldNames));
     }
 
     /**
-     * Get existing connector ID by title or description
+     * Records which half of the compatibility matrix the installation went through.
+     *
+     * @param list<ConnectorDescription> $connectorsToRegister
+     * @param list<string>|null $portalFieldNames
+     */
+    private static function logFieldSetInUse(array $connectorsToRegister, ?array $portalFieldNames): void
+    {
+        // Every description carries the same field names, so one of them shows what is actually sent.
+        $sample = $connectorsToRegister[0] ?? [];
+        $sentFields = array_keys(self::selectFieldsKnownToPortal($sample, $portalFieldNames));
+
+        if ($portalFieldNames === null) {
+            self::getLog()->info('Application.registerConnectors.portalFieldSetDegraded', [
+                'reason' => 'fieldSetUnavailable',
+                'sentFields' => $sentFields,
+            ]);
+
+            return;
+        }
+
+        foreach (self::FIELDS_OUTSIDE_BASE_SET as $fieldName) {
+            if (!in_array($fieldName, $portalFieldNames, true)) {
+                self::getLog()->info('Application.registerConnectors.portalFieldSetDegraded', [
+                    'reason' => 'fieldNotSupportedByPortal',
+                    'fieldName' => $fieldName,
+                    'sentFields' => $sentFields,
+                ]);
+
+                return;
+            }
+        }
+
+        self::getLog()->info('Application.registerConnectors.portalFieldSet', [
+            'sentFields' => $sentFields,
+        ]);
+    }
+
+    /**
+     * Reads an overridable setting of the application from the environment.
+     */
+    private static function readEnvString(string $name, string $default): string
+    {
+        $value = $_ENV[$name] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : $default;
+    }
+
+    /**
+     * Finds the connector the portal already holds for this description.
+     *
+     * The source family identifies a connector on its own, but only a portal new enough to know the field
+     * reports it. The title and the description stay in use for the older ones, and because the title is
+     * overridden by an environment variable, matching on it alone would create duplicates.
+     *
+     * @param list<array<string, mixed>> $existingConnectors
      */
     private static function getExistingConnectorId(
         array $existingConnectors,
         string $title,
-        string $description = ''
+        string $description = '',
+        ?string $sourceCode = null
     ): ?int {
+        if ($sourceCode !== null && $sourceCode !== '') {
+            foreach ($existingConnectors as $connector) {
+                if (($connector['sourceCode'] ?? null) !== $sourceCode) {
+                    continue;
+                }
+
+                $connectorId = self::readConnectorId($connector);
+
+                if ($connectorId !== null) {
+                    return $connectorId;
+                }
+            }
+        }
+
         foreach ($existingConnectors as $connector) {
             // Check by title
             if (isset($connector['title']) && $connector['title'] === $title) {
-                return $connector['id'] ?? null;
+                return self::readConnectorId($connector);
             }
             // Check by description if provided
             if (
-                !empty($description) && isset($connector['description'])
+                $description !== '' && isset($connector['description'])
                 && $connector['description'] === $description
             ) {
-                return $connector['id'] ?? null;
+                return self::readConnectorId($connector);
             }
         }
+
         return null;
     }
 
     /**
-     * Register single connector via direct API call
+     * @param array<string, mixed> $connector
      */
-    private static function registerConnectorViaAPI(string $domain, string $accessToken, array $connectorData): void
+    private static function readConnectorId(array $connector): ?int
     {
-        $url = "https://{$domain}/rest/biconnector.connector.add";
+        $connectorId = $connector['id'] ?? null;
 
-        $postData = [
-            'auth' => $accessToken,
-            'fields' => $connectorData
-        ];
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($postData));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        self::getLog()->info('Application.registerConnectorViaAPI', [
-            'title' => $connectorData['title'],
-            'httpCode' => $httpCode,
-            'response' => $response
-        ]);
-    }
-
-    /**
-     * Update existing connector via direct API call
-     */
-    private static function updateConnectorViaAPI(
-        string $domain,
-        string $accessToken,
-        int $connectorId,
-        array $connectorData
-    ): void {
-        $url = "https://{$domain}/rest/biconnector.connector.update";
-
-        $postData = [
-            'auth' => $accessToken,
-            'id' => $connectorId,
-            'fields' => $connectorData
-        ];
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($postData));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        self::getLog()->info('Application.updateConnectorViaAPI', [
-            'id' => $connectorId,
-            'title' => $connectorData['title'],
-            'httpCode' => $httpCode,
-            'response' => $response
-        ]);
+        return is_numeric($connectorId) ? (int)$connectorId : null;
     }
 
     /**
