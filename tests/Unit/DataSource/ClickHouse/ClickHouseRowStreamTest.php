@@ -11,6 +11,39 @@ use PHPUnit\Framework\TestCase;
 
 class ClickHouseRowStreamTest extends TestCase
 {
+    private const BOUNDARY_VARIABLES = [
+        'CLICKHOUSE_MAX_LINE_BYTES',
+        'CLICKHOUSE_MAX_RESPONSE_BYTES',
+    ];
+
+    /** @var array<string, mixed> */
+    private array $environmentBackup = [];
+
+    protected function setUp(): void
+    {
+        // The boundaries are read from the environment, so every test starts from the defaults of the
+        // application and not from whatever the shell of the developer carries.
+        foreach (self::BOUNDARY_VARIABLES as $name) {
+            $this->environmentBackup[$name] = $_ENV[$name] ?? null;
+            unset($_ENV[$name]);
+        }
+    }
+
+    protected function tearDown(): void
+    {
+        foreach ($this->environmentBackup as $name => $value) {
+            if ($value === null) {
+                unset($_ENV[$name]);
+
+                continue;
+            }
+
+            $_ENV[$name] = $value;
+        }
+
+        $this->environmentBackup = [];
+    }
+
     /**
      * @return resource
      */
@@ -424,6 +457,90 @@ class ClickHouseRowStreamTest extends TestCase
         unset($rows);
 
         self::assertFalse(is_resource($stream), 'A consumer that stops early must still release the stream.');
+    }
+
+    public function testTheBodyOfAnAnswerThatIsNotClickHouseDoesNotReachTheCaller(): void
+    {
+        // The address of the source is chosen by the caller, so the answer may come from any service
+        // reachable from the network of the application.
+        $body = '<html>internal admin page, cookie=zzz</html>';
+        $stream = self::streamOf($body . "\n");
+
+        try {
+            new ClickHouseRowStream($stream);
+            self::fail('A body that is not an answer of ClickHouse must not produce a readable stream.');
+        } catch (ClickHouseQueryException $exception) {
+            self::assertStringNotContainsString('cookie', $exception->getMessage());
+            self::assertStringNotContainsString('internal admin page', $exception->getMessage());
+            self::assertSame('The answer of ClickHouse could not be read.', $exception->getMessage());
+        }
+    }
+
+    public function testALineLongerThanItsBoundaryFailsTheReading(): void
+    {
+        $_ENV['CLICKHOUSE_MAX_LINE_BYTES'] = '1024';
+
+        // A body without a line break used to be read into memory as a whole.
+        $stream = self::streamOf('["id"]' . "\n" . '["String"]' . "\n" . '["' . str_repeat('a', 200000));
+
+        $rows = new ClickHouseRowStream($stream);
+
+        $this->expectException(ClickHouseQueryException::class);
+        $this->expectExceptionMessage('A line of the answer of ClickHouse is longer than the 1024 bytes');
+
+        $rows->fetchRow();
+    }
+
+    public function testALineLongerThanItsBoundaryFailsEvenWhenItEndsProperly(): void
+    {
+        $_ENV['CLICKHOUSE_MAX_LINE_BYTES'] = '1024';
+
+        $stream = self::streamOf(
+            '["id"]' . "\n" . '["String"]' . "\n" . '["' . str_repeat('a', 4096) . '"]' . "\n"
+        );
+
+        $rows = new ClickHouseRowStream($stream);
+
+        $this->expectException(ClickHouseQueryException::class);
+
+        $rows->fetchRow();
+    }
+
+    public function testABodyLongerThanItsBoundaryFailsTheReading(): void
+    {
+        $_ENV['CLICKHOUSE_MAX_RESPONSE_BYTES'] = '64';
+
+        $stream = self::streamOf(
+            '["id"]' . "\n"
+            . '["UInt32"]' . "\n"
+            . implode("\n", array_map(static fn (int $value): string => '[' . $value . ']', range(1, 100)))
+            . "\n"
+        );
+
+        $rows = new ClickHouseRowStream($stream);
+
+        $this->expectException(ClickHouseQueryException::class);
+        $this->expectExceptionMessage('The answer of ClickHouse is longer than the 64 bytes');
+
+        while ($rows->fetchRow() !== null) {
+            continue;
+        }
+    }
+
+    public function testTheBoundariesAreReadFromTheEnvironment(): void
+    {
+        $_ENV['CLICKHOUSE_MAX_LINE_BYTES'] = '2048';
+        $_ENV['CLICKHOUSE_MAX_RESPONSE_BYTES'] = '4096';
+
+        $rows = new ClickHouseRowStream(self::streamOf('["id"]' . "\n" . '["UInt32"]' . "\n"));
+
+        $line = new \ReflectionProperty($rows, 'maxLineBytes');
+        $line->setAccessible(true);
+        $response = new \ReflectionProperty($rows, 'maxResponseBytes');
+        $response->setAccessible(true);
+
+        self::assertSame(2048, $line->getValue($rows));
+        self::assertSame(4096, $response->getValue($rows));
     }
 
     public function testAClosedResourceIsRefused(): void

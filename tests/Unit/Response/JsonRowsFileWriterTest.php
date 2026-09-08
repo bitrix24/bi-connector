@@ -29,6 +29,53 @@ class JsonRowsFileWriterTest extends TestCase
         }
     }
 
+    public function testAFileLeftBehindByAStoppedRequestIsSweptAway(): void
+    {
+        $stale = $this->directory . '/rows_stale';
+        $fresh = $this->directory . '/rows_fresh';
+        $foreign = $this->directory . '/other_stale';
+
+        foreach ([$stale, $fresh, $foreign] as $path) {
+            file_put_contents($path, '[]');
+        }
+
+        touch($stale, time() - 7200);
+        touch($foreign, time() - 7200);
+
+        $writer = new JsonRowsFileWriter($this->directory);
+        $path = $writer->write($this->yieldRows([]));
+
+        $this->assertFileDoesNotExist($stale, 'A file older than the age of a request must be removed.');
+        $this->assertFileExists($fresh, 'A file of a request that may still be running must be kept.');
+        $this->assertFileExists($foreign, 'Only the files of this writer are swept away.');
+        $this->assertFileExists($path);
+
+        unlink($path);
+    }
+
+    public function testTheSweepIsSwitchedOffByANonPositiveAge(): void
+    {
+        $stale = $this->directory . '/rows_stale';
+        file_put_contents($stale, '[]');
+        touch($stale, time() - 7200);
+
+        $backup = $_ENV['ROWS_FILE_MAX_AGE_SECONDS'] ?? null;
+        $_ENV['ROWS_FILE_MAX_AGE_SECONDS'] = '0';
+
+        try {
+            $writer = new JsonRowsFileWriter($this->directory);
+            unlink($writer->write($this->yieldRows([])));
+
+            $this->assertFileExists($stale);
+        } finally {
+            if ($backup === null) {
+                unset($_ENV['ROWS_FILE_MAX_AGE_SECONDS']);
+            } else {
+                $_ENV['ROWS_FILE_MAX_AGE_SECONDS'] = $backup;
+            }
+        }
+    }
+
     public function testBodyMatchesJsonEncodeOfTheSameRows(): void
     {
         $rows = [

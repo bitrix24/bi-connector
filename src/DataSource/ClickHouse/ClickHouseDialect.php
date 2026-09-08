@@ -21,14 +21,18 @@ final class ClickHouseDialect
     private const NUMBER_PATTERN = '/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/';
 
     /**
-     * Wraps a name into backquotes, doubling the ones already inside it.
+     * Wraps a name into backquotes, doubling the ones already inside it and escaping the backslashes.
+     *
+     * ClickHouse reads a quoted name with the escaping rules of a string literal, so a name ending with a
+     * backslash would escape the closing quote and swallow the rest of the statement. The backslash is
+     * replaced first, because the doubling that follows must not be walked over a second time.
      *
      * The name is never split on a dot: a dot belongs to the name itself, and a qualified name is built by
      * quoting every part separately.
      */
     public static function quoteIdentifier(string $identifier): string
     {
-        return '`' . str_replace('`', '``', $identifier) . '`';
+        return '`' . str_replace(['\\', '`'], ['\\\\', '``'], $identifier) . '`';
     }
 
     /**

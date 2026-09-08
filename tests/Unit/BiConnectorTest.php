@@ -161,6 +161,55 @@ class BiConnectorTest extends TestCase
         $this->assertEquals('Table name is required', $responseData['error']);
     }
 
+    public function testCacheKeyKeepsItsHistoricFormForWellFormedParameters(): void
+    {
+        $connectionParams = $this->uniqueConnectionParams();
+        $connector = new BiConnector($connectionParams, 'mysql', $this->logger);
+
+        $this->assertSame(
+            $this->cacheKey('table_list_', $connectionParams, 'orders'),
+            $this->buildCacheKey($connector, 'table_list_', 'orders'),
+            'Entries written by the previous releases have to stay reachable.'
+        );
+    }
+
+    public function testConnectionsWithUnencodableParametersDoNotShareACacheEntry(): void
+    {
+        // A byte sequence that is not valid UTF-8 used to make json_encode() answer false, and false became
+        // an empty string inside the key: every such connection ended up on one entry.
+        $firstParams = $this->uniqueConnectionParams();
+        $firstParams['password'] = "\xB1\x31";
+
+        $secondParams = $this->uniqueConnectionParams();
+        $secondParams['password'] = "\xC3\x28";
+
+        $firstTables = [['code' => 'first_orders', 'title' => 'first_orders']];
+        $secondTables = [['code' => 'second_orders', 'title' => 'second_orders']];
+
+        $firstDataSource = $this->createMock(DataSourceInterface::class);
+        $firstDataSource->expects($this->once())->method('listTables')->willReturn($firstTables);
+
+        $secondDataSource = $this->createMock(DataSourceInterface::class);
+        $secondDataSource->expects($this->once())->method('listTables')->willReturn($secondTables);
+
+        $firstConnector = new BiConnector($firstParams, 'mysql', $this->logger, $firstDataSource);
+        $secondConnector = new BiConnector($secondParams, 'mysql', $this->logger, $secondDataSource);
+
+        try {
+            $firstResponse = $firstConnector->tableList();
+            $secondResponse = $secondConnector->tableList();
+
+            $this->assertSame(json_encode($firstTables), $firstResponse->getContent());
+            $this->assertSame(json_encode($secondTables), $secondResponse->getContent());
+        } finally {
+            $this->forgetCacheItem($firstConnector, (string)$this->buildCacheKey($firstConnector, 'table_list_', ''));
+            $this->forgetCacheItem(
+                $secondConnector,
+                (string)$this->buildCacheKey($secondConnector, 'table_list_', '')
+            );
+        }
+    }
+
     /**
      * Connection parameters nobody else has used, so that the catalog cache starts out cold.
      */
@@ -175,6 +224,14 @@ class BiConnectorTest extends TestCase
     private function cacheKey(string $prefix, array $connectionParams, string $suffix): string
     {
         return $prefix . md5(json_encode($connectionParams) . 'mysql' . $suffix);
+    }
+
+    private function buildCacheKey(BiConnector $connector, string $prefix, string $suffix): ?string
+    {
+        $method = new \ReflectionMethod($connector, 'buildCacheKey');
+        $method->setAccessible(true);
+
+        return $method->invoke($connector, $prefix, $suffix);
     }
 
     private function forgetCacheItem(BiConnector $connector, string $cacheKey): void

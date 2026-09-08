@@ -156,7 +156,7 @@ final class ClickHouseDataSource implements DataSourceInterface
             'rowLimit' => $rowLimit,
         ]);
 
-        $rowStream = new ClickHouseRowStream($this->httpClient->query($sql, $rowLimit));
+        $rowStream = new ClickHouseRowStream($this->httpClient->query($sql, $rowLimit), $this->logger);
         $dataRowsCount = 0;
 
         try {
@@ -189,7 +189,7 @@ final class ClickHouseDataSource implements DataSourceInterface
      */
     private function openStream(string $sql): ClickHouseRowStream
     {
-        return new ClickHouseRowStream($this->httpClient->query($sql));
+        return new ClickHouseRowStream($this->httpClient->query($sql), $this->logger);
     }
 
     /**

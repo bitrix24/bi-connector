@@ -104,12 +104,10 @@ class BiConnector
         ]);
 
         try {
-            $cacheKey = 'table_list_' . md5(
-                json_encode($this->connectionParams) . $this->connectionType . $searchString
-            );
-            $cacheItem = $this->cache->getItem($cacheKey);
+            $cacheKey = $this->buildCacheKey('table_list_', $searchString);
+            $cacheItem = $cacheKey === null ? null : $this->cache->getItem($cacheKey);
 
-            if ($cacheItem->isHit()) {
+            if ($cacheItem !== null && $cacheItem->isHit()) {
                 $tables = $cacheItem->get();
                 $this->logger->info('BiConnector.tableList.fromCache', [
                     'class' => self::class,
@@ -122,10 +120,14 @@ class BiConnector
 
                 // Cache for configured time
                 $ttl = (int)($_ENV['CACHE_TTL_TABLE_LIST'] ?? 3600);
-                $cacheItem->set($tables);
-                $cacheItem->expiresAfter($ttl);
+                $saved = false;
 
-                $saved = $this->cache->save($cacheItem);
+                if ($cacheItem !== null) {
+                    $cacheItem->set($tables);
+                    $cacheItem->expiresAfter($ttl);
+
+                    $saved = $this->cache->save($cacheItem);
+                }
 
                 $this->logger->info('BiConnector.tableList.fromDatabase', [
                     'class' => self::class,
@@ -183,12 +185,10 @@ class BiConnector
         }
 
         try {
-            $cacheKey = 'table_desc_' . md5(
-                json_encode($this->connectionParams) . $this->connectionType . $tableName
-            );
-            $cacheItem = $this->cache->getItem($cacheKey);
+            $cacheKey = $this->buildCacheKey('table_desc_', $tableName);
+            $cacheItem = $cacheKey === null ? null : $this->cache->getItem($cacheKey);
 
-            if ($cacheItem->isHit()) {
+            if ($cacheItem !== null && $cacheItem->isHit()) {
                 $fields = $cacheItem->get();
                 $this->logger->info('BiConnector.tableDescription.fromCache', [
                     'class' => self::class,
@@ -202,10 +202,14 @@ class BiConnector
 
                 // Cache for configured time
                 $ttl = (int)($_ENV['CACHE_TTL_TABLE_DESCRIPTION'] ?? 1800);
-                $cacheItem->set($fields);
-                $cacheItem->expiresAfter($ttl);
+                $saved = false;
 
-                $saved = $this->cache->save($cacheItem);
+                if ($cacheItem !== null) {
+                    $cacheItem->set($fields);
+                    $cacheItem->expiresAfter($ttl);
+
+                    $saved = $this->cache->save($cacheItem);
+                }
 
                 $this->logger->info('BiConnector.tableDescription.fromDatabase', [
                     'class' => self::class,
@@ -304,6 +308,32 @@ class BiConnector
                 ['Content-Type' => 'application/json']
             );
         }
+    }
+
+    /**
+     * Key of a cache entry, or null when the parameters of the connection cannot be encoded.
+     *
+     * The encoding is not allowed to fail quietly: json_encode() answers false on a broken UTF-8 sequence,
+     * false becomes an empty string inside the concatenation, and the key stops depending on the address
+     * and the credentials of the connection, so two connections would share one entry. Substituting the
+     * broken sequences keeps the key of a well formed set of parameters exactly as it was.
+     */
+    private function buildCacheKey(string $prefix, string $suffix): ?string
+    {
+        $encodedParams = json_encode($this->connectionParams, JSON_INVALID_UTF8_SUBSTITUTE);
+
+        if ($encodedParams === false) {
+            $this->logger->warning('BiConnector.buildCacheKey.notEncodable', [
+                'class' => self::class,
+                'method' => 'buildCacheKey',
+                'prefix' => $prefix,
+                'message' => json_last_error_msg()
+            ]);
+
+            return null;
+        }
+
+        return $prefix . md5($encodedParams . $this->connectionType . $suffix);
     }
 
     /**

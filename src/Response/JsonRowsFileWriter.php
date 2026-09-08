@@ -14,6 +14,11 @@ class JsonRowsFileWriter
 {
     private const FILE_PREFIX = 'rows_';
 
+    // A file of a request that was stopped between the writing and the sending is left behind: neither the
+    // catch block nor the sending runs when the process is killed. Such a file is swept away on the next
+    // request once it is older than this, an age no request that is still being served can reach.
+    private const DEFAULT_MAX_AGE_SECONDS = 3600;
+
     private string $directory;
     private int $rowsWritten = 0;
 
@@ -34,6 +39,7 @@ class JsonRowsFileWriter
     public function write(iterable $rows): string
     {
         $this->rowsWritten = 0;
+        $this->removeStaleFiles();
 
         $path = tempnam($this->directory, self::FILE_PREFIX);
 
@@ -71,6 +77,38 @@ class JsonRowsFileWriter
     public function getDataRowCount(): int
     {
         return $this->rowsWritten - 1;
+    }
+
+    /**
+     * Removes the files of the requests that never got to send or to drop their own.
+     */
+    private function removeStaleFiles(): void
+    {
+        $maxAge = (int)($_ENV['ROWS_FILE_MAX_AGE_SECONDS'] ?? self::DEFAULT_MAX_AGE_SECONDS);
+
+        if ($maxAge <= 0) {
+            return;
+        }
+
+        $paths = glob($this->directory . '/' . self::FILE_PREFIX . '*');
+
+        if ($paths === false) {
+            return;
+        }
+
+        $deadline = time() - $maxAge;
+
+        foreach ($paths as $path) {
+            // A file may be taken away by another request between the listing and the reading of its age,
+            // so neither step is allowed to raise here.
+            $modifiedAt = @filemtime($path);
+
+            if ($modifiedAt === false || $modifiedAt > $deadline) {
+                continue;
+            }
+
+            @unlink($path);
+        }
     }
 
     /**

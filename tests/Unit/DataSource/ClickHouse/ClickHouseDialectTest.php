@@ -22,6 +22,8 @@ class ClickHouseDialectTest extends TestCase
             'name that tries to close the quoting' => ['a` , `b', '`a`` , ``b`'],
             'name with a dot stays one name' => ['db.table', '`db.table`'],
             'name with a single quote' => ["o'brien", "`o'brien`"],
+            'name with a backslash' => ['back\\slash', '`back\\\\slash`'],
+            'name that tries to escape the closing quote' => ['deals\\', '`deals\\\\`'],
         ];
     }
 

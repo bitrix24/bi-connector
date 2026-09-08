@@ -152,11 +152,7 @@ final class ClickHouseHttpClient
         }
 
         if ($statusCode < 200 || $statusCode >= 300) {
-            throw new \RuntimeException(sprintf(
-                'ClickHouse answered with HTTP status %d: %s',
-                $statusCode,
-                $this->readErrorMessage($response)
-            ));
+            throw new \RuntimeException($this->readFailureReason($response, $statusCode));
         }
 
         $this->logger->debug('ClickHouseHttpClient.query.success', [
@@ -245,15 +241,39 @@ final class ClickHouseHttpClient
     }
 
     /**
-     * A failed statement answers with plain text, so the body itself is the most informative message.
+     * The reason a failed answer is reported with.
+     *
+     * A failed statement answers with the display text of the failure, and that text is handed back as it
+     * is. Any other body belongs to a service that is not ClickHouse: the address of the source is chosen
+     * by the caller, so such a body stays inside the application, reaches the log alone and the caller is
+     * told the status of the answer.
      */
-    private function readErrorMessage(ResponseInterface $response): string
+    private function readFailureReason(ResponseInterface $response, int $statusCode): string
+    {
+        $body = $this->readBody($response);
+        $failureText = ClickHouseQueryException::findFailureText($body);
+
+        if ($failureText !== null) {
+            return sprintf('ClickHouse answered with HTTP status %d: %s', $statusCode, $failureText);
+        }
+
+        $this->logger->error('ClickHouseHttpClient.query.failed', [
+            'class' => self::class,
+            'method' => 'query',
+            'statusCode' => $statusCode,
+            'body' => $body,
+        ]);
+
+        return sprintf('ClickHouse answered with HTTP status %d.', $statusCode);
+    }
+
+    private function readBody(ResponseInterface $response): string
     {
         $stream = StreamWrapper::createResource($response, $this->httpClient);
         $body = trim((string)stream_get_contents($stream, self::ERROR_MESSAGE_MAX_LENGTH));
         fclose($stream);
 
-        return $body !== '' ? $body : 'no message in the answer';
+        return $body;
     }
 
     /**

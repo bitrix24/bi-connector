@@ -280,6 +280,49 @@ class ClickHouseHttpClientTest extends TestCase
         $client->query('SELECT bad');
     }
 
+    public function testTheBodyOfAnAnswerThatIsNotClickHouseDoesNotReachTheCaller(): void
+    {
+        // The address of the source is chosen by the caller, so the answer of a failed request may belong
+        // to any service reachable from the network of the application.
+        $transport = new MockHttpClient(new MockResponse(
+            "SECRET-INTERNAL-PAGE: token=abcdef\nsecond line",
+            ['http_code' => 404]
+        ));
+
+        $client = $this->createClient($transport);
+
+        try {
+            $client->query('SELECT 1');
+            $this->fail('An answer outside the successful range must fail the statement.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringNotContainsString('SECRET-INTERNAL-PAGE', $exception->getMessage());
+            $this->assertStringNotContainsString('token=abcdef', $exception->getMessage());
+            $this->assertSame('ClickHouse answered with HTTP status 404.', $exception->getMessage());
+        }
+    }
+
+    public function testOnlyTheFailureTextOfAPartlyWrittenAnswerReachesTheCaller(): void
+    {
+        // A statement that fails while its answer is being put together is answered with the part of the
+        // result the server had already written and the display text of the failure after it.
+        $transport = new MockHttpClient(new MockResponse(
+            '["number"]' . "\n" . '["UInt64"]' . "\n"
+            . '["Code: 396. DB::Exception: Limit for result exceeded (TOO_MANY_ROWS_OR_BYTES)"]',
+            ['http_code' => 500]
+        ));
+
+        $client = $this->createClient($transport);
+
+        try {
+            $client->query('SELECT number FROM system.numbers');
+            $this->fail('An answer outside the successful range must fail the statement.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Limit for result exceeded', $exception->getMessage());
+            $this->assertStringNotContainsString('["number"]', $exception->getMessage());
+            $this->assertStringNotContainsString('UInt64', $exception->getMessage());
+        }
+    }
+
     public function testUnreadableHostIsRejected(): void
     {
         $client = $this->createClient(new MockHttpClient(), ['host' => '   ']);

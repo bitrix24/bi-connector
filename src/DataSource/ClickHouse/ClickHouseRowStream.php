@@ -4,22 +4,35 @@ declare(strict_types=1);
 
 namespace App\DataSource\ClickHouse;
 
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
+
 /**
  * Reader over the body of a successful ClickHouse answer.
  *
  * The body arrives in the JSONCompactEachRowWithNamesAndTypes format: the first line carries the column
  * names, the second one the ClickHouse type names, every line after that is one data row. The body is read
- * line by line and is never collected into a string, so the size of the answer does not become the size of
- * the memory the request needs.
+ * one line at a time, so the memory a request needs is bounded by the longest line and not by the size of
+ * the answer. Both boundaries are held here and not left to the source: the settings of the statement are
+ * kept by a well behaved ClickHouse alone, while the address of the source is chosen by the caller.
  */
 final class ClickHouseRowStream
 {
     private const JSON_DEPTH = 512;
 
-    // A failure that reaches the body after the answer has started is written by the server as its own
-    // display text: the numeric code, the class of the exception and the message. Matching the class
-    // loosely keeps the subclasses of DB::Exception, such as DB::NetException, recognizable.
-    private const FAILURE_MESSAGE_PATTERN = '/^Code: \d+\. DB::\w*Exception/';
+    // fgets() allocates the whole limit it is given, so the reading walks the line in chunks of this size
+    // instead of asking for the boundary of the line at once.
+    private const READ_CHUNK_BYTES = 65536;
+
+    // How much of an unreadable line reaches the log. The line itself belongs to the answer of a source the
+    // caller has chosen and never leaves the application.
+    private const LOG_FRAGMENT_LENGTH = 512;
+
+    // Boundaries of the reading, both overridable through the environment. A row of a report is a list of
+    // field values, so four megabytes of a single line is already far beyond any answer of a source, and a
+    // gigabyte of a body matches the default cap of a million rows at a kilobyte each.
+    private const DEFAULT_MAX_LINE_BYTES = 4194304;
+    private const DEFAULT_MAX_RESPONSE_BYTES = 1073741824;
 
     /** @var resource|null */
     private $stream;
@@ -30,18 +43,32 @@ final class ClickHouseRowStream
     /** @var list<string> */
     private array $columnTypes;
 
+    private LoggerInterface $logger;
+    private int $maxLineBytes;
+    private int $maxResponseBytes;
+    private int $bytesRead = 0;
+
     /**
      * @param resource $stream body of the answer, positioned at the first line
      *
      * @throws ClickHouseQueryException when the body carries a failure instead of the header
      */
-    public function __construct($stream)
+    public function __construct($stream, ?LoggerInterface $logger = null)
     {
         if (!is_resource($stream)) {
             throw new \InvalidArgumentException('ClickHouseRowStream needs an open stream to read from.');
         }
 
         $this->stream = $stream;
+        $this->logger = $logger ?? new NullLogger();
+        $this->maxLineBytes = self::readBoundaryFromEnvironment(
+            'CLICKHOUSE_MAX_LINE_BYTES',
+            self::DEFAULT_MAX_LINE_BYTES
+        );
+        $this->maxResponseBytes = self::readBoundaryFromEnvironment(
+            'CLICKHOUSE_MAX_RESPONSE_BYTES',
+            self::DEFAULT_MAX_RESPONSE_BYTES
+        );
         $this->columnNames = $this->readHeaderLine('column names');
         $this->columnTypes = $this->readHeaderLine('column types');
     }
@@ -87,19 +114,15 @@ final class ClickHouseRowStream
             return null;
         }
 
-        while (($line = fgets($this->stream)) !== false) {
-            $line = trim($line);
+        $line = $this->readNonEmptyLine();
 
-            if ($line === '') {
-                continue;
-            }
+        if ($line === null) {
+            $this->close();
 
-            return $this->alignRow($this->decodeLine($line));
+            return null;
         }
 
-        $this->close();
-
-        return null;
+        return $this->alignRow($this->decodeLine($line));
     }
 
     /**
@@ -139,9 +162,7 @@ final class ClickHouseRowStream
 
         foreach ($decoded as $name) {
             if (!is_string($name)) {
-                $this->close();
-
-                throw new ClickHouseQueryException($line);
+                $this->failOnUnreadableLine($line);
             }
 
             $names[] = $name;
@@ -170,9 +191,7 @@ final class ClickHouseRowStream
         $values = json_decode($line, true, self::JSON_DEPTH, JSON_BIGINT_AS_STRING);
 
         if (!is_array($values) || !array_is_list($values)) {
-            $this->close();
-
-            throw new ClickHouseQueryException($line);
+            $this->failOnUnreadableLine($line);
         }
 
         $message = self::readFailureMessage($values);
@@ -197,16 +216,15 @@ final class ClickHouseRowStream
             return null;
         }
 
-        return preg_match(self::FAILURE_MESSAGE_PATTERN, $values[0]) === 1 ? $values[0] : null;
+        return ClickHouseQueryException::readFailureText($values[0]);
     }
 
+    /**
+     * @throws ClickHouseQueryException when a boundary of the reading is crossed
+     */
     private function readNonEmptyLine(): ?string
     {
-        if ($this->stream === null) {
-            return null;
-        }
-
-        while (($line = fgets($this->stream)) !== false) {
+        while (($line = $this->readBoundedLine()) !== null) {
             $line = trim($line);
 
             if ($line !== '') {
@@ -215,6 +233,94 @@ final class ClickHouseRowStream
         }
 
         return null;
+    }
+
+    /**
+     * Reads one line of the body with both boundaries of the reading applied.
+     *
+     * Crossing a boundary fails the reading instead of shortening the line: a shortened line would either
+     * be unreadable or, worse, pass for a complete row of the answer.
+     *
+     * @throws ClickHouseQueryException when the line or the whole body outgrows its boundary
+     */
+    private function readBoundedLine(): ?string
+    {
+        $line = '';
+
+        while ($this->stream !== null) {
+            $chunk = fgets($this->stream, self::READ_CHUNK_BYTES + 1);
+
+            if ($chunk === false) {
+                return $line === '' ? null : $line;
+            }
+
+            $this->bytesRead += strlen($chunk);
+            $line .= $chunk;
+
+            if ($this->bytesRead > $this->maxResponseBytes) {
+                $this->close();
+
+                throw new ClickHouseQueryException(sprintf(
+                    'The answer of ClickHouse is longer than the %d bytes the application reads.',
+                    $this->maxResponseBytes
+                ));
+            }
+
+            if (strlen($line) > $this->maxLineBytes) {
+                $this->close();
+
+                throw new ClickHouseQueryException(sprintf(
+                    'A line of the answer of ClickHouse is longer than the %d bytes the application reads.',
+                    $this->maxLineBytes
+                ));
+            }
+
+            if (str_ends_with($chunk, "\n")) {
+                return $line;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Stops the reading over a line that is not a row of the answer.
+     *
+     * A failure that ClickHouse writes as plain text is recognized by its display text and is handed back
+     * as it is: this is how a failed statement reports its reason. Anything else is a piece of the answer
+     * of a source the caller has chosen and stays inside the application, because that source may be any
+     * service reachable from the network of the application: a truncated fragment goes to the log and the
+     * caller is told the shape of the failure alone.
+     *
+     * @throws ClickHouseQueryException
+     */
+    private function failOnUnreadableLine(string $line): never
+    {
+        $this->close();
+        $failureText = ClickHouseQueryException::readFailureText($line);
+
+        if ($failureText !== null) {
+            throw new ClickHouseQueryException($failureText);
+        }
+
+        $this->logger->error('ClickHouseRowStream.unreadableLine', [
+            'class' => self::class,
+            'method' => 'failOnUnreadableLine',
+            'fragment' => substr($line, 0, self::LOG_FRAGMENT_LENGTH),
+        ]);
+
+        throw new ClickHouseQueryException('The answer of ClickHouse could not be read.');
+    }
+
+    /**
+     * A boundary is never left unbounded: a missing, unreadable or non positive setting falls back to the
+     * default of the application.
+     */
+    private static function readBoundaryFromEnvironment(string $name, int $default): int
+    {
+        $value = (int)($_ENV[$name] ?? $default);
+
+        return $value > 0 ? $value : $default;
     }
 
     /**
