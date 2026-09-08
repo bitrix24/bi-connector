@@ -60,7 +60,8 @@ class ClickHouseIntegrationTest extends TestCase
 
         if ($endpoint === null) {
             $this->markTestSkipped(sprintf(
-                'No ClickHouse at %s or %s; start it with "docker compose --profile test up -d clickhouse".',
+                'PRECONDITION: no ClickHouse at %s or %s; start it with '
+                . '"docker compose --profile test up -d clickhouse".',
                 self::HOST_ENDPOINT,
                 self::NETWORK_ENDPOINT
             ));
@@ -315,17 +316,30 @@ class ClickHouseIntegrationTest extends TestCase
 
     public function testAFailureAppendedToAStartedAnswerBecomesAnError(): void
     {
-        // The statement fails in the middle of the answer: the status is already 200, the header and a
-        // part of the rows have been read, and the reason arrives inside the body afterwards. Reaching a
-        // ClickHouseQueryException and not the \RuntimeException of the transport is what tells a failure
-        // of the body apart from a failure of the request.
-        $handedOut = 0;
+        // The statement fails after the answer has started: the status is already 200 and the header has
+        // been read, and the reason arrives inside the body afterwards. Reaching a ClickHouseQueryException
+        // and not the \RuntimeException of the transport is what tells a failure of the body apart from a
+        // failure of the request. How many data rows the server manages to put on the wire before the
+        // failure is its own decision: the server keeps the unsent part of the answer in its output buffer
+        // and replaces it with the reason, so a run against 24.8 sees the header and the reason alone. The
+        // reading of rows already handed out before such a reason is therefore pinned on a written body by
+        // ClickHouseRowStreamTest, and the live server answers here for the shape of the answer itself.
+        $client = new ClickHouseHttpClient($this->connectionParams(), new NullLogger());
+        $rows = new ClickHouseRowStream($client->query(
+            "SELECT number, toString(number), throwIf(number = 400000, 'late failure') FROM system.numbers"
+        ));
+
+        $this->assertCount(
+            3,
+            $rows->getColumnNames(),
+            'The answer has to start as a successful one, otherwise the failure is not the late kind.'
+        );
 
         try {
-            $this->readRowsThroughStream(
-                "SELECT number, toString(number), throwIf(number = 400000, 'late failure') FROM system.numbers",
-                $handedOut
-            );
+            while ($rows->fetchRow() !== null) {
+                continue;
+            }
+
             $this->fail('A failure appended to a started answer must not pass for the end of the data.');
         } catch (ClickHouseQueryException $exception) {
             $this->assertMatchesRegularExpression(
@@ -333,12 +347,6 @@ class ClickHouseIntegrationTest extends TestCase
                 $exception->getMessage()
             );
         }
-
-        $this->assertGreaterThan(
-            0,
-            $handedOut,
-            'The answer has to be a truncated successful one, otherwise the failure is not the late kind.'
-        );
     }
 
     public function testAFailureAppendedToASingleColumnAnswerBecomesAnError(): void
