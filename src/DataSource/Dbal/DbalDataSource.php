@@ -196,17 +196,9 @@ final class DbalDataSource implements DataSourceInterface
                 'method' => 'getConnection'
             ]);
 
-            $dsn = $this->buildDsn($this->connectionType);
-
-            $connectionParams = [
-                'url' => $dsn,
-                'driverOptions' => [
-                    \PDO::ATTR_TIMEOUT => (int)($_ENV['DB_CONNECTION_TIMEOUT'] ?? 30),
-                    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-                ]
-            ];
-
-            $this->connection = DriverManager::getConnection($connectionParams);
+            $this->connection = DriverManager::getConnection(
+                $this->buildConnectionParams($this->connectionType)
+            );
 
             $this->logger->info('DbalDataSource.getConnection.created', [
                 'class' => self::class,
@@ -219,36 +211,62 @@ final class DbalDataSource implements DataSourceInterface
     }
 
     /**
-     * Build DSN string based on connection type
+     * Connection parameters of the source, one entry per value.
+     *
+     * No value is written into a DSN string. DBAL merges the query part of the `url` parameter into the
+     * parameters of the connection, so a value carrying a question mark used to replace the driver, the
+     * path of the database file or the driver options the application sets.
+     *
+     * @return array<string, mixed>
      */
-    private function buildDsn(ConnectionType $connectionType): string
+    private function buildConnectionParams(ConnectionType $connectionType): array
     {
-        $host = $this->connectionParams['host'] ?? 'localhost';
-        $database = $this->connectionParams['database'] ?? '';
-        $username = $this->connectionParams['username'] ?? '';
-        $password = $this->connectionParams['password'] ?? '';
-
-        return match ($connectionType) {
-            ConnectionType::Mysql => sprintf(
-                'mysql://%s:%s@%s:%s/%s',
-                urlencode((string)$username),
-                urlencode((string)$password),
-                (string)$host,
-                (string)($this->connectionParams['port'] ?? '3306'),
-                (string)$database
-            ),
-            ConnectionType::Postgresql => sprintf(
-                'postgresql://%s:%s@%s:%s/%s',
-                urlencode((string)$username),
-                urlencode((string)$password),
-                (string)$host,
-                (string)($this->connectionParams['port'] ?? '5432'),
-                (string)$database
-            ),
+        $driver = match ($connectionType) {
+            ConnectionType::Mysql => 'pdo_mysql',
+            ConnectionType::Postgresql => 'pdo_pgsql',
             default => throw new \InvalidArgumentException(
                 'Unsupported connection type: ' . $connectionType->value
             )
         };
+
+        $port = (int)($this->connectionParams['port'] ?? 0);
+
+        if ($port <= 0) {
+            $port = $connectionType === ConnectionType::Mysql ? 3306 : 5432;
+        }
+
+        return [
+            'driver' => $driver,
+            'host' => $this->readAddressPart('host', 'localhost'),
+            'port' => $port,
+            'dbname' => $this->readAddressPart('database', ''),
+            'user' => (string)($this->connectionParams['username'] ?? ''),
+            'password' => (string)($this->connectionParams['password'] ?? ''),
+            'driverOptions' => [
+                \PDO::ATTR_TIMEOUT => (int)($_ENV['DB_CONNECTION_TIMEOUT'] ?? 30),
+                \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+            ],
+        ];
+    }
+
+    /**
+     * The address and the name of the database are the two values the driver writes into its own DSN, where
+     * a semicolon separates the parameters and a blank separates them once the DSN of PostgreSQL is turned
+     * into a connection string. A value carrying one of them is refused instead of being passed on, so that
+     * no value can add a parameter of its own.
+     */
+    private function readAddressPart(string $name, string $default): string
+    {
+        $value = (string)($this->connectionParams[$name] ?? $default);
+
+        if (preg_match('/[;\x00-\x20]/', $value) === 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'The %s of the connection carries a character that is not allowed in an address.',
+                $name
+            ));
+        }
+
+        return $value;
     }
 
     /**

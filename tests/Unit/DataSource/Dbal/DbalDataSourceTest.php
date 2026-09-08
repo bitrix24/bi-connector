@@ -9,6 +9,7 @@ use App\DataSource\Dbal\DbalDataSource;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Statement;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 
@@ -83,40 +84,110 @@ class DbalDataSourceTest extends TestCase
         $this->assertEquals('string', $method->invoke($dataSource, 'text'));
     }
 
-    public function testBuildDsn(): void
+    public function testBuildConnectionParams(): void
     {
         $dataSource = $this->createDataSource(ConnectionType::Mysql);
 
-        $reflection = new \ReflectionClass($dataSource);
-        $method = $reflection->getMethod('buildDsn');
-        $method->setAccessible(true);
+        $mysqlParams = $this->buildConnectionParams($dataSource, ConnectionType::Mysql);
+        $this->assertSame('pdo_mysql', $mysqlParams['driver']);
+        $this->assertSame('localhost', $mysqlParams['host']);
+        $this->assertSame(3306, $mysqlParams['port']);
+        $this->assertSame('test_db', $mysqlParams['dbname']);
+        $this->assertSame('test_user', $mysqlParams['user']);
+        $this->assertSame('test_pass', $mysqlParams['password']);
+        $this->assertArrayNotHasKey('url', $mysqlParams);
 
-        // Test MySQL DSN
-        $mysqlDsn = $method->invoke($dataSource, ConnectionType::Mysql);
-        $this->assertStringContainsString('mysql://', $mysqlDsn);
-        $this->assertStringContainsString('localhost', $mysqlDsn);
-        $this->assertStringContainsString('3306', $mysqlDsn);
-        $this->assertStringContainsString('test_db', $mysqlDsn);
-
-        // Test PostgreSQL DSN
-        $pgDsn = $method->invoke($dataSource, ConnectionType::Postgresql);
-        $this->assertStringContainsString('postgresql://', $pgDsn);
-        $this->assertStringContainsString('localhost', $pgDsn);
-        $this->assertStringContainsString('test_db', $pgDsn);
+        $pgParams = $this->buildConnectionParams($dataSource, ConnectionType::Postgresql);
+        $this->assertSame('pdo_pgsql', $pgParams['driver']);
+        $this->assertSame('localhost', $pgParams['host']);
+        $this->assertSame('test_db', $pgParams['dbname']);
+        $this->assertArrayNotHasKey('url', $pgParams);
     }
 
-    public function testBuildDsnWithConnectionTypeOutsideDbal(): void
+    public function testBuildConnectionParamsWithConnectionTypeOutsideDbal(): void
     {
         $dataSource = $this->createDataSource(ConnectionType::Mysql);
-
-        $reflection = new \ReflectionClass($dataSource);
-        $method = $reflection->getMethod('buildDsn');
-        $method->setAccessible(true);
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('Unsupported connection type: clickhouse');
 
-        $method->invoke($dataSource, ConnectionType::Clickhouse);
+        $this->buildConnectionParams($dataSource, ConnectionType::Clickhouse);
+    }
+
+    public function testTheDatabaseNameCannotReplaceTheParametersOfTheConnection(): void
+    {
+        // The query part of a DSN used to be merged into the parameters of the connection, so a value of
+        // this shape replaced the driver and pointed the connection at a file of the application host.
+        $this->connectionParams['database'] = 'app?driver=pdo_sqlite&path=/tmp/x';
+
+        $params = $this->buildConnectionParams(
+            $this->createDataSource(ConnectionType::Mysql),
+            ConnectionType::Mysql
+        );
+
+        $this->assertSame('pdo_mysql', $params['driver']);
+        $this->assertSame('app?driver=pdo_sqlite&path=/tmp/x', $params['dbname']);
+        $this->assertArrayNotHasKey('path', $params);
+        $this->assertSame(
+            [\PDO::ATTR_TIMEOUT => 30, \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION],
+            $params['driverOptions']
+        );
+    }
+
+    public function testTheDatabaseNameCannotReplaceTheDriverOptions(): void
+    {
+        // 1001 is PDO::MYSQL_ATTR_LOCAL_INFILE, which turns the source into a reader of the files of the
+        // application host.
+        $this->connectionParams['database'] = 'app?driverOptions[1001]=1';
+
+        $params = $this->buildConnectionParams(
+            $this->createDataSource(ConnectionType::Mysql),
+            ConnectionType::Mysql
+        );
+
+        $this->assertSame(
+            [\PDO::ATTR_TIMEOUT => 30, \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION],
+            $params['driverOptions']
+        );
+    }
+
+    public function testTheHostCannotReplaceThePassword(): void
+    {
+        $this->connectionParams['host'] = 'h?password=zzz';
+
+        $params = $this->buildConnectionParams(
+            $this->createDataSource(ConnectionType::Mysql),
+            ConnectionType::Mysql
+        );
+
+        $this->assertSame('test_pass', $params['password']);
+        $this->assertSame('h?password=zzz', $params['host']);
+    }
+
+    /**
+     * @return list<array{0: string, 1: string}>
+     */
+    public static function addressPartProvider(): array
+    {
+        return [
+            'a semicolon in the host' => ['host', 'db.example;unix_socket=/tmp/s'],
+            'a semicolon in the database name' => ['database', 'app;unix_socket=/tmp/s'],
+            'a blank in the host' => ['host', 'db.example host=evil'],
+            'a tab in the database name' => ['database', "app\tunix_socket=/tmp/s"],
+        ];
+    }
+
+    #[DataProvider('addressPartProvider')]
+    public function testAValueThatCanAddAParameterToTheDsnOfTheDriverIsRefused(string $name, string $value): void
+    {
+        $this->connectionParams[$name] = $value;
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->buildConnectionParams(
+            $this->createDataSource(ConnectionType::Mysql),
+            ConnectionType::Mysql
+        );
     }
 
     public function testCheckProbesTheConnectionWithASelectQuery(): void
@@ -235,6 +306,17 @@ class DbalDataSourceTest extends TestCase
             ['code' => 'ID', 'name' => 'ID', 'type' => 'int'],
             ['code' => 'CREATED_AT', 'name' => 'CREATED_AT', 'type' => 'datetime'],
         ], $fields);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function buildConnectionParams(DbalDataSource $dataSource, ConnectionType $connectionType): array
+    {
+        $method = new \ReflectionMethod($dataSource, 'buildConnectionParams');
+        $method->setAccessible(true);
+
+        return $method->invoke($dataSource, $connectionType);
     }
 
     private function createDataSource(ConnectionType $connectionType, ?Connection $connection = null): DbalDataSource
