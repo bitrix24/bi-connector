@@ -441,8 +441,7 @@ class ConnectorRegistrationTest extends TestCase
     }
 
     /**
-     * Replaces the reflection check of the former `updateConnectorViaAPI`: what has to hold is that a
-     * connector the portal already holds is changed and not registered a second time.
+     * A connector the portal already holds is changed and not registered a second time.
      */
     public function testAConnectorThePortalAlreadyHoldsIsUpdatedAndNotDuplicated(): void
     {

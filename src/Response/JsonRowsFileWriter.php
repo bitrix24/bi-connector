@@ -66,7 +66,7 @@ class JsonRowsFileWriter
     /**
      * Number of data rows written, the leading column-name row excluded.
      *
-     * Nothing written at all gives -1: the value the caller logged before rows became a stream.
+     * Nothing written at all gives -1, the count an answer without rows carries in the log.
      */
     public function getDataRowCount(): int
     {
