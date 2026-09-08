@@ -40,7 +40,7 @@ class ClickHouseIntegrationTest extends TestCase
     private const BULK_ROWS = 100000;
 
     private const BOUNDARY_VARIABLES = [
-        'CLICKHOUSE_MAX_RESULT_ROWS',
+        'MAX_RESULT_ROWS',
         'CLICKHOUSE_MAX_ROWS_TO_READ',
         'CLICKHOUSE_MAX_EXECUTION_TIME',
     ];
@@ -277,7 +277,7 @@ class ClickHouseIntegrationTest extends TestCase
     {
         // The portal asks for more rows than the application allows: the cap wins and the answer is not
         // an overflow failure.
-        $_ENV['CLICKHOUSE_MAX_RESULT_ROWS'] = '2';
+        $_ENV['MAX_RESULT_ROWS'] = '2';
 
         $rows = $this->fetchRows(self::TYPES_TABLE, ['ID'], [], 1000);
 
@@ -286,7 +286,7 @@ class ClickHouseIntegrationTest extends TestCase
 
     public function testResultRowsBoundaryFailsTheStatement(): void
     {
-        $_ENV['CLICKHOUSE_MAX_RESULT_ROWS'] = '10';
+        $_ENV['MAX_RESULT_ROWS'] = '10';
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessageMatches('/Limit for result exceeded/');
@@ -354,7 +354,7 @@ class ClickHouseIntegrationTest extends TestCase
         // One column: the appended failure carries exactly as many values as a data row of this answer,
         // so nothing but the message itself tells them apart. The server sends the header and appends the
         // reason to it, which is the position a data row would take.
-        $_ENV['CLICKHOUSE_MAX_RESULT_ROWS'] = '100000';
+        $_ENV['MAX_RESULT_ROWS'] = '100000';
         $handedOut = 0;
 
         $this->expectException(ClickHouseQueryException::class);

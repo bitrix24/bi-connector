@@ -42,7 +42,12 @@ final class ClickHouseDataSource implements DataSourceInterface
 
     public function check(): void
     {
-        $rowStream = $this->openStream($this->queryBuilder->buildCheck());
+        // The check runs under the short time budget of the transport: it tells whether the address answers
+        // at all, and an address that drops packets must not hold a worker thread of the application.
+        $rowStream = new ClickHouseRowStream(
+            $this->httpClient->queryAvailability($this->queryBuilder->buildCheck()),
+            $this->logger
+        );
 
         try {
             $rowStream->fetchRow();
@@ -171,7 +176,7 @@ final class ClickHouseDataSource implements DataSourceInterface
             do {
                 $dataRowsCount++;
 
-                yield self::toScalarRow($row);
+                yield $row;
             } while (($row = $rowStream->fetchRow()) !== null);
 
             $this->logger->info('ClickHouseDataSource.fetchData.success', [
@@ -190,34 +195,6 @@ final class ClickHouseDataSource implements DataSourceInterface
     private function openStream(string $sql): ClickHouseRowStream
     {
         return new ClickHouseRowStream($this->httpClient->query($sql), $this->logger);
-    }
-
-    /**
-     * @param list<mixed> $row
-     *
-     * @return list<scalar|null>
-     */
-    private static function toScalarRow(array $row): array
-    {
-        return array_map(self::toScalar(...), $row);
-    }
-
-    /**
-     * The values keep the shape the answer gave them: a whole number and a decimal both arrive as exact
-     * text and a cast would round them away. Only a value that has no scalar form at all, the one of an
-     * Array or a Map column, becomes text, and such a column is described as a string anyway.
-     *
-     * @return scalar|null
-     */
-    private static function toScalar(mixed $value): string|int|float|bool|null
-    {
-        if ($value === null || is_scalar($value)) {
-            return $value;
-        }
-
-        $encoded = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-
-        return $encoded === false ? null : $encoded;
     }
 
     private static function toText(mixed $value): string

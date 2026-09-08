@@ -16,7 +16,7 @@ use Symfony\Component\HttpClient\Response\MockResponse;
 
 class ClickHouseQueryBuilderTest extends TestCase
 {
-    private const ROW_LIMIT_VARIABLE = 'CLICKHOUSE_MAX_RESULT_ROWS';
+    private const ROW_LIMIT_VARIABLE = 'MAX_RESULT_ROWS';
 
     /** @var array<string, mixed>|null */
     private ?array $capturedRequest = null;

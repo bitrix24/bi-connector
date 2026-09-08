@@ -121,7 +121,9 @@ final class DbalDataSource implements DataSourceInterface
         ]);
 
         if ($this->connectionType === ConnectionType::Mysql) {
-            $sql = "DESCRIBE `{$tableName}`";
+            // MySQL takes no parameter in the place of a table name, so the name is escaped by the
+            // connection here and not left to the check of the entry point alone.
+            $sql = 'DESCRIBE ' . $this->getConnection()->quoteIdentifier($tableName);
         } else { // PostgreSQL
             $sql = "SELECT column_name, data_type, is_nullable
                    FROM information_schema.columns

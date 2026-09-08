@@ -14,6 +14,11 @@ use Symfony\Component\HttpFoundation\Response;
 
 class BiConnector
 {
+    // An expired catalogue entry is dropped only when the same key is asked for again, so entries of
+    // connections nobody asks about any more stay on disk. Sweeping the whole store is a walk over the
+    // directory, so it runs on a small share of the requests of a rare action instead of on every one.
+    private const DEFAULT_CACHE_PRUNE_PROBABILITY = 100;
+
     private array $connectionParams;
     private string $connectionType;
     private LoggerInterface $logger;
@@ -138,6 +143,8 @@ class BiConnector
                     'cacheSaved' => $saved
                 ]);
             }
+
+            $this->pruneCacheOccasionally();
 
             return new Response(
                 json_encode($tables) ?: '[]',
@@ -334,6 +341,22 @@ class BiConnector
         }
 
         return $prefix . md5($encodedParams . $this->connectionType . $suffix);
+    }
+
+    /**
+     * Removes the expired entries of the catalogue cache on a small share of the requests.
+     *
+     * A probability that is not positive switches the sweep off.
+     */
+    private function pruneCacheOccasionally(): void
+    {
+        $probability = (int)($_ENV['CACHE_PRUNE_PROBABILITY'] ?? self::DEFAULT_CACHE_PRUNE_PROBABILITY);
+
+        if ($probability <= 0 || random_int(1, $probability) !== 1) {
+            return;
+        }
+
+        $this->cache->prune();
     }
 
     /**

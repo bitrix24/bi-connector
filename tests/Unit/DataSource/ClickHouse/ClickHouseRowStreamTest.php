@@ -14,6 +14,8 @@ class ClickHouseRowStreamTest extends TestCase
     private const BOUNDARY_VARIABLES = [
         'CLICKHOUSE_MAX_LINE_BYTES',
         'CLICKHOUSE_MAX_RESPONSE_BYTES',
+        'CLICKHOUSE_EXPECTED_ROW_BYTES',
+        'MAX_RESULT_ROWS',
     ];
 
     /** @var array<string, mixed> */
@@ -541,6 +543,55 @@ class ClickHouseRowStreamTest extends TestCase
 
         self::assertSame(2048, $line->getValue($rows));
         self::assertSame(4096, $response->getValue($rows));
+    }
+
+    public function testTheBoundaryOfTheBodyFollowsTheBoundaryOfTheRows(): void
+    {
+        // The two boundaries used to be set apart from one another, so a wide answer ran into the byte
+        // boundary long before the row boundary and lost the work already done.
+        $_ENV['MAX_RESULT_ROWS'] = '1000';
+        $_ENV['CLICKHOUSE_EXPECTED_ROW_BYTES'] = '2048';
+
+        $rows = new ClickHouseRowStream(self::streamOf('["id"]' . "\n" . '["UInt32"]' . "\n"));
+
+        $response = new \ReflectionProperty($rows, 'maxResponseBytes');
+        $response->setAccessible(true);
+
+        self::assertSame(1000 * 2048, $response->getValue($rows));
+    }
+
+    public function testTheRefusalOverTheBodyNamesBothBoundaries(): void
+    {
+        $_ENV['MAX_RESULT_ROWS'] = '4';
+        $_ENV['CLICKHOUSE_EXPECTED_ROW_BYTES'] = '8';
+
+        $stream = self::streamOf(
+            '["id"]' . "\n"
+            . '["UInt32"]' . "\n"
+            . implode("\n", array_map(static fn (int $value): string => '[' . $value . ']', range(1, 100)))
+            . "\n"
+        );
+
+        $rows = new ClickHouseRowStream($stream);
+
+        $this->expectException(ClickHouseQueryException::class);
+        $this->expectExceptionMessage('longer than the 32 bytes the application reads (4 rows at 8 bytes each)');
+
+        while ($rows->fetchRow() !== null) {
+            continue;
+        }
+    }
+
+    public function testAValueWithoutAScalarFormBecomesTextInTheRowItself(): void
+    {
+        // The row is walked once: the alignment and the published shape of the values happen together.
+        $rows = new ClickHouseRowStream(self::streamOf(
+            '["id","tags"]' . "\n"
+            . '["UInt32","Array(String)"]' . "\n"
+            . '[1,["alpha","beta"]]' . "\n"
+        ));
+
+        self::assertSame([1, '["alpha","beta"]'], $rows->fetchRow());
     }
 
     public function testAClosedResourceIsRefused(): void

@@ -14,10 +14,15 @@ use Symfony\Component\HttpClient\Response\MockResponse;
 class ClickHouseHttpClientTest extends TestCase
 {
     private const BOUNDARY_VARIABLES = [
-        'CLICKHOUSE_MAX_RESULT_ROWS',
+        'MAX_RESULT_ROWS',
         'CLICKHOUSE_MAX_ROWS_TO_READ',
         'CLICKHOUSE_MAX_EXECUTION_TIME',
+        'CLICKHOUSE_CHECK_TIMEOUT_SECONDS',
     ];
+
+    // ClickHouse marks a failed answer with the numeric code of its exception; the application reads a body
+    // as a failure only when the answer carries that header.
+    private const FAILURE_HEADERS = ['X-ClickHouse-Exception-Code' => '62'];
 
     /** @var array<string, mixed> */
     private array $environmentBackup = [];
@@ -167,7 +172,7 @@ class ClickHouseHttpClientTest extends TestCase
 
     public function testRowLimitAboveTheApplicationCapIsLowered(): void
     {
-        $_ENV['CLICKHOUSE_MAX_RESULT_ROWS'] = '1000';
+        $_ENV['MAX_RESULT_ROWS'] = '1000';
 
         $client = $this->createClient($this->createCapturingTransport());
 
@@ -180,7 +185,7 @@ class ClickHouseHttpClientTest extends TestCase
 
     public function testRowLimitBelowTheApplicationCapIsKept(): void
     {
-        $_ENV['CLICKHOUSE_MAX_RESULT_ROWS'] = '1000';
+        $_ENV['MAX_RESULT_ROWS'] = '1000';
 
         $client = $this->createClient($this->createCapturingTransport());
 
@@ -193,7 +198,7 @@ class ClickHouseHttpClientTest extends TestCase
 
     public function testMissingRowLimitFallsBackToTheApplicationCap(): void
     {
-        $_ENV['CLICKHOUSE_MAX_RESULT_ROWS'] = '1000';
+        $_ENV['MAX_RESULT_ROWS'] = '1000';
 
         $client = $this->createClient($this->createCapturingTransport());
 
@@ -269,7 +274,7 @@ class ClickHouseHttpClientTest extends TestCase
     {
         $transport = new MockHttpClient(new MockResponse(
             'Code: 62. DB::Exception: Syntax error',
-            ['http_code' => 500]
+            ['http_code' => 500, 'response_headers' => self::FAILURE_HEADERS]
         ));
 
         $client = $this->createClient($transport);
@@ -308,7 +313,7 @@ class ClickHouseHttpClientTest extends TestCase
         $transport = new MockHttpClient(new MockResponse(
             '["number"]' . "\n" . '["UInt64"]' . "\n"
             . '["Code: 396. DB::Exception: Limit for result exceeded (TOO_MANY_ROWS_OR_BYTES)"]',
-            ['http_code' => 500]
+            ['http_code' => 500, 'response_headers' => self::FAILURE_HEADERS]
         ));
 
         $client = $this->createClient($transport);
@@ -321,6 +326,71 @@ class ClickHouseHttpClientTest extends TestCase
             $this->assertStringNotContainsString('["number"]', $exception->getMessage());
             $this->assertStringNotContainsString('UInt64', $exception->getMessage());
         }
+    }
+
+    public function testAFailureTextReflectedByAnotherServiceDoesNotReachTheCaller(): void
+    {
+        // The caller chooses the address, so it can send the pattern of a failure text out inside the
+        // request. A service that reflects what it is sent answers with that pattern and with whatever it
+        // writes after it, and none of that belongs to the caller.
+        $transport = new MockHttpClient(new MockResponse(
+            "unknown database: Code: 1. DB::Exception\nservice=metadata-v1 token=eyJhbGciOiJIUzI1NiJ9.SECRET\n",
+            ['http_code' => 404]
+        ));
+
+        $client = $this->createClient($transport);
+
+        try {
+            $client->query('SELECT 1');
+            $this->fail('An answer outside the successful range must fail the statement.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('ClickHouse answered with HTTP status 404.', $exception->getMessage());
+            $this->assertStringNotContainsString('token=', $exception->getMessage());
+            $this->assertStringNotContainsString('metadata-v1', $exception->getMessage());
+        }
+    }
+
+    public function testAFailureTextThatDoesNotOpenALineDoesNotReachTheCaller(): void
+    {
+        // Even with the header of ClickHouse on the answer, the display text is read only where the server
+        // writes it: at the beginning of a line of the body.
+        $transport = new MockHttpClient(new MockResponse(
+            "unknown database: Code: 1. DB::Exception\nservice=metadata-v1 token=eyJhbGciOiJIUzI1NiJ9.SECRET\n",
+            ['http_code' => 404, 'response_headers' => self::FAILURE_HEADERS]
+        ));
+
+        $client = $this->createClient($transport);
+
+        try {
+            $client->query('SELECT 1');
+            $this->fail('An answer outside the successful range must fail the statement.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('ClickHouse answered with HTTP status 404.', $exception->getMessage());
+        }
+    }
+
+    public function testTheAvailabilityCheckGetsAShortTimeBudget(): void
+    {
+        $client = $this->createClient($this->createCapturingTransport());
+
+        $this->closeStream($client->queryAvailability('SELECT 1'));
+
+        $options = $this->capturedRequest['options'];
+        $this->assertSame(10.0, $options['timeout']);
+        $this->assertSame(10.0, $options['max_duration']);
+    }
+
+    public function testTheTimeBudgetOfTheCheckFollowsTheEnvironment(): void
+    {
+        $_ENV['CLICKHOUSE_CHECK_TIMEOUT_SECONDS'] = '3';
+
+        $client = $this->createClient($this->createCapturingTransport());
+
+        $this->closeStream($client->queryAvailability('SELECT 1'));
+
+        $options = $this->capturedRequest['options'];
+        $this->assertSame(3.0, $options['timeout']);
+        $this->assertSame(3.0, $options['max_duration']);
     }
 
     public function testUnreadableHostIsRejected(): void

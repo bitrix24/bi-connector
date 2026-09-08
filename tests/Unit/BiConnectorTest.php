@@ -6,6 +6,7 @@ namespace App\Tests\Unit;
 
 use App\BiConnector;
 use App\DataSource\DataSourceInterface;
+use App\Tests\Unit\Support\PruneCountingAdapter;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Response;
@@ -208,6 +209,47 @@ class BiConnectorTest extends TestCase
                 (string)$this->buildCacheKey($secondConnector, 'table_list_', '')
             );
         }
+    }
+
+    public function testTheCatalogueCacheIsPrunedOnAShareOfTheRequests(): void
+    {
+        // An expired entry is dropped only when the same key is asked for again, so the store is swept as
+        // well; the sweep is a walk over the directory and therefore does not run on every request.
+        $connectionParams = $this->uniqueConnectionParams();
+        $dataSource = $this->createMock(DataSourceInterface::class);
+        $dataSource->method('listTables')->willReturn([]);
+
+        $connector = new BiConnector($connectionParams, 'mysql', $this->logger, $dataSource);
+        $spy = $this->replaceCacheWithASpy($connector);
+
+        $backup = $_ENV['CACHE_PRUNE_PROBABILITY'] ?? null;
+
+        try {
+            $_ENV['CACHE_PRUNE_PROBABILITY'] = '1';
+            $connector->tableList();
+            $this->assertSame(1, $spy->pruneCalls, 'Every request prunes when the probability says so.');
+
+            $_ENV['CACHE_PRUNE_PROBABILITY'] = '0';
+            $connector->tableList();
+            $this->assertSame(1, $spy->pruneCalls, 'A probability that is not positive switches it off.');
+        } finally {
+            if ($backup === null) {
+                unset($_ENV['CACHE_PRUNE_PROBABILITY']);
+            } else {
+                $_ENV['CACHE_PRUNE_PROBABILITY'] = $backup;
+            }
+        }
+    }
+
+    private function replaceCacheWithASpy(BiConnector $connector): PruneCountingAdapter
+    {
+        $property = new \ReflectionProperty($connector, 'cache');
+        $property->setAccessible(true);
+
+        $spy = new PruneCountingAdapter('biconnector', 0, dirname(__DIR__, 2) . '/cache');
+        $property->setValue($connector, $spy);
+
+        return $spy;
     }
 
     /**

@@ -267,6 +267,9 @@ class DbalDataSourceTest extends TestCase
 
         $connection = $this->createMock(Connection::class);
         $connection
+            ->method('quoteIdentifier')
+            ->willReturnCallback(static fn (string $identifier): string => '`' . $identifier . '`');
+        $connection
             ->expects($this->once())
             ->method('prepare')
             ->with('DESCRIBE `orders`')
@@ -306,6 +309,34 @@ class DbalDataSourceTest extends TestCase
             ['code' => 'ID', 'name' => 'ID', 'type' => 'int'],
             ['code' => 'CREATED_AT', 'name' => 'CREATED_AT', 'type' => 'datetime'],
         ], $fields);
+    }
+
+    public function testDescribeTableForMysqlEscapesTheTableName(): void
+    {
+        // The name is checked at the entry point, in another file. The escaping belongs here as well, so
+        // that no other caller of the source can break out of the identifier.
+        $result = $this->createMock(Result::class);
+        $result->method('fetchAssociative')->willReturn(false);
+
+        $statement = $this->createMock(Statement::class);
+        $statement->method('executeQuery')->willReturn($result);
+
+        $connection = $this->createMock(Connection::class);
+        $connection
+            ->expects($this->once())
+            ->method('quoteIdentifier')
+            ->with('orders`; DROP TABLE users; --')
+            ->willReturn('`orders``; DROP TABLE users; --`');
+        $connection
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('DESCRIBE `orders``; DROP TABLE users; --`')
+            ->willReturn($statement);
+
+        $fields = $this->createDataSource(ConnectionType::Mysql, $connection)
+            ->describeTable('orders`; DROP TABLE users; --');
+
+        $this->assertSame([], $fields);
     }
 
     /**

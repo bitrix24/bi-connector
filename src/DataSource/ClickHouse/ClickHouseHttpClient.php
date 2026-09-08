@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\DataSource\ClickHouse;
 
+use App\DataSource\RowLimit;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Component\HttpClient\Response\StreamWrapper;
@@ -40,9 +41,20 @@ final class ClickHouseHttpClient
     private const IDLE_TIMEOUT_SECONDS = 300;
     private const MAX_DURATION_SECONDS = 600;
 
+    /**
+     * The availability check gets a budget of its own. The thread pool of the runtime is fixed, so a handful
+     * of requests to an address that drops packets makes the whole application unreachable; and the check is
+     * exactly the action a wrong address is entered against. Telling whether an address answers at all does
+     * not need the budget of a statement that reads a report.
+     */
+    private const DEFAULT_CHECK_TIMEOUT_SECONDS = 10;
+
     private const ERROR_MESSAGE_MAX_LENGTH = 4096;
 
-    private const DEFAULT_MAX_RESULT_ROWS = 1000000;
+    // ClickHouse marks every failed answer with the numeric code of its exception. Symfony hands the names
+    // of the headers over in lower case.
+    private const FAILURE_CODE_HEADER = 'x-clickhouse-exception-code';
+
     private const DEFAULT_MAX_ROWS_TO_READ = 100000000;
     private const DEFAULT_MAX_EXECUTION_TIME = 60;
 
@@ -50,9 +62,10 @@ final class ClickHouseHttpClient
     private array $connectionParams;
     private LoggerInterface $logger;
     private HttpClientInterface $httpClient;
-    private int $maxResultRows;
+    private RowLimit $rowLimit;
     private int $maxRowsToRead;
     private int $maxExecutionTime;
+    private int $checkTimeout;
 
     /**
      * @param array<string, mixed> $connectionParams host, database, username and password of the source
@@ -67,10 +80,7 @@ final class ClickHouseHttpClient
         $this->logger = $logger;
         $this->httpClient = $httpClient ?? HttpClient::create();
 
-        $this->maxResultRows = self::readBoundaryFromEnvironment(
-            'CLICKHOUSE_MAX_RESULT_ROWS',
-            self::DEFAULT_MAX_RESULT_ROWS
-        );
+        $this->rowLimit = RowLimit::fromEnvironment();
         $this->maxRowsToRead = self::readBoundaryFromEnvironment(
             'CLICKHOUSE_MAX_ROWS_TO_READ',
             self::DEFAULT_MAX_ROWS_TO_READ
@@ -79,14 +89,19 @@ final class ClickHouseHttpClient
             'CLICKHOUSE_MAX_EXECUTION_TIME',
             self::DEFAULT_MAX_EXECUTION_TIME
         );
+        $this->checkTimeout = self::readBoundaryFromEnvironment(
+            'CLICKHOUSE_CHECK_TIMEOUT_SECONDS',
+            self::DEFAULT_CHECK_TIMEOUT_SECONDS
+        );
 
         $this->logger->debug('ClickHouseHttpClient.__construct', [
             'class' => self::class,
             'method' => '__construct',
             'connectionParams' => array_keys($connectionParams),
-            'maxResultRows' => $this->maxResultRows,
+            'maxResultRows' => $this->rowLimit->getMaximum(),
             'maxRowsToRead' => $this->maxRowsToRead,
             'maxExecutionTime' => $this->maxExecutionTime,
+            'checkTimeout' => $this->checkTimeout,
         ]);
     }
 
@@ -98,11 +113,7 @@ final class ClickHouseHttpClient
      */
     public function resolveRowLimit(int $requestedLimit): int
     {
-        if ($requestedLimit <= 0) {
-            return $this->maxResultRows;
-        }
-
-        return min($requestedLimit, $this->maxResultRows);
+        return $this->rowLimit->resolve($requestedLimit);
     }
 
     /**
@@ -116,7 +127,29 @@ final class ClickHouseHttpClient
      */
     public function query(string $sql, ?int $rowLimit = null)
     {
-        $maxResultRows = $this->resolveRowLimit($rowLimit ?? 0);
+        return $this->send($sql, $rowLimit ?? 0, self::IDLE_TIMEOUT_SECONDS, self::MAX_DURATION_SECONDS);
+    }
+
+    /**
+     * Sends the statement of an availability check under the short budget of that action.
+     *
+     * @return resource body of the answer; the caller closes it
+     *
+     * @throws \RuntimeException when the source answers with a redirect or with any other non successful status
+     */
+    public function queryAvailability(string $sql)
+    {
+        return $this->send($sql, 0, $this->checkTimeout, $this->checkTimeout);
+    }
+
+    /**
+     * @return resource
+     *
+     * @throws \RuntimeException
+     */
+    private function send(string $sql, int $rowLimit, int $idleTimeout, int $maxDuration)
+    {
+        $maxResultRows = $this->resolveRowLimit($rowLimit);
         $baseUrl = $this->buildBaseUrl();
 
         $this->logger->debug('ClickHouseHttpClient.query.start', [
@@ -124,6 +157,8 @@ final class ClickHouseHttpClient
             'method' => 'query',
             'endpoint' => $baseUrl,
             'maxResultRows' => $maxResultRows,
+            'idleTimeout' => $idleTimeout,
+            'maxDuration' => $maxDuration,
         ]);
 
         $response = $this->httpClient->request('POST', $baseUrl . '/?' . http_build_query(
@@ -134,8 +169,8 @@ final class ClickHouseHttpClient
             // A redirect is not followed: the source must not be able to move the statement, the
             // credentials and the answer to another address.
             'max_redirects' => 0,
-            'timeout' => self::IDLE_TIMEOUT_SECONDS,
-            'max_duration' => self::MAX_DURATION_SECONDS,
+            'timeout' => $idleTimeout,
+            'max_duration' => $maxDuration,
             // The body is read from the wire by the caller and is never collected in memory here.
             'buffer' => false,
         ]);
@@ -247,11 +282,17 @@ final class ClickHouseHttpClient
      * is. Any other body belongs to a service that is not ClickHouse: the address of the source is chosen
      * by the caller, so such a body stays inside the application, reaches the log alone and the caller is
      * told the status of the answer.
+     *
+     * Two things have to hold before a body is read as a failure. The answer carries the header ClickHouse
+     * marks a failure with, which a service that merely reflects what was sent to it does not write; and
+     * the display text stands at the beginning of a line of that body, so a text that travelled out inside
+     * the request and came back inside the body cannot pass for the reason.
      */
     private function readFailureReason(ResponseInterface $response, int $statusCode): string
     {
+        $carriesFailureCode = $this->carriesFailureCode($response);
         $body = $this->readBody($response);
-        $failureText = ClickHouseQueryException::findFailureText($body);
+        $failureText = $carriesFailureCode ? ClickHouseQueryException::readFailureTextFromBody($body) : null;
 
         if ($failureText !== null) {
             return sprintf('ClickHouse answered with HTTP status %d: %s', $statusCode, $failureText);
@@ -265,6 +306,19 @@ final class ClickHouseHttpClient
         ]);
 
         return sprintf('ClickHouse answered with HTTP status %d.', $statusCode);
+    }
+
+    /**
+     * Whether the answer carries the failure code of ClickHouse.
+     *
+     * Confirmed against 24.8: the header is on every failed answer, 400, 403, 404 and 500 alike, no matter
+     * whether the body carries the display text alone or the opening lines of the output format before it.
+     */
+    private function carriesFailureCode(ResponseInterface $response): bool
+    {
+        $code = $response->getHeaders(false)[self::FAILURE_CODE_HEADER][0] ?? '';
+
+        return preg_match('/^\d+$/', $code) === 1;
     }
 
     private function readBody(ResponseInterface $response): string

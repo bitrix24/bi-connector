@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\DataSource\ClickHouse;
 
+use App\DataSource\RowLimit;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
@@ -29,10 +30,13 @@ final class ClickHouseRowStream
     private const LOG_FRAGMENT_LENGTH = 512;
 
     // Boundaries of the reading, both overridable through the environment. A row of a report is a list of
-    // field values, so four megabytes of a single line is already far beyond any answer of a source, and a
-    // gigabyte of a body matches the default cap of a million rows at a kilobyte each.
+    // field values, so four megabytes of a single line is already far beyond any answer of a source.
     private const DEFAULT_MAX_LINE_BYTES = 4194304;
-    private const DEFAULT_MAX_RESPONSE_BYTES = 1073741824;
+
+    // The boundary of the whole body follows the boundary on the number of rows, so that lowering the one
+    // lowers the other and a legitimate answer is not stopped by the byte boundary long before the row
+    // boundary. The width is what the pair is tuned with: rows wider than this need it raised.
+    private const DEFAULT_EXPECTED_ROW_BYTES = 1024;
 
     /** @var resource|null */
     private $stream;
@@ -46,6 +50,8 @@ final class ClickHouseRowStream
     private LoggerInterface $logger;
     private int $maxLineBytes;
     private int $maxResponseBytes;
+    private int $maxResultRows;
+    private int $expectedRowBytes;
     private int $bytesRead = 0;
 
     /**
@@ -65,9 +71,14 @@ final class ClickHouseRowStream
             'CLICKHOUSE_MAX_LINE_BYTES',
             self::DEFAULT_MAX_LINE_BYTES
         );
+        $this->maxResultRows = RowLimit::fromEnvironment()->getMaximum();
+        $this->expectedRowBytes = self::readBoundaryFromEnvironment(
+            'CLICKHOUSE_EXPECTED_ROW_BYTES',
+            self::DEFAULT_EXPECTED_ROW_BYTES
+        );
         $this->maxResponseBytes = self::readBoundaryFromEnvironment(
             'CLICKHOUSE_MAX_RESPONSE_BYTES',
-            self::DEFAULT_MAX_RESPONSE_BYTES
+            $this->maxResultRows * $this->expectedRowBytes
         );
         $this->columnNames = $this->readHeaderLine('column names');
         $this->columnTypes = $this->readHeaderLine('column types');
@@ -104,7 +115,7 @@ final class ClickHouseRowStream
      * The values keep the shape the JSON parsing gave them: a number is not cast to a PHP type here, because
      * a whole number that does not fit a float arrives as text and a cast would round it away.
      *
-     * @return list<mixed>|null values of the row, or null once the data is exhausted
+     * @return list<scalar|null>|null values of the row, or null once the data is exhausted
      *
      * @throws ClickHouseQueryException when the body carries a failure instead of a row
      */
@@ -261,8 +272,11 @@ final class ClickHouseRowStream
                 $this->close();
 
                 throw new ClickHouseQueryException(sprintf(
-                    'The answer of ClickHouse is longer than the %d bytes the application reads.',
-                    $this->maxResponseBytes
+                    'The answer of ClickHouse is longer than the %d bytes the application reads '
+                    . '(%d rows at %d bytes each).',
+                    $this->maxResponseBytes,
+                    $this->maxResultRows,
+                    $this->expectedRowBytes
                 ));
             }
 
@@ -325,11 +339,12 @@ final class ClickHouseRowStream
 
     /**
      * Brings a row to the width of the header: a short row is filled up with nulls, so that a value is
-     * always read under the column it belongs to.
+     * always read under the column it belongs to. The values are brought to their published shape in the
+     * same pass, because a second walk over every row of a large answer costs as much as the first one.
      *
      * @param list<mixed> $values
      *
-     * @return list<mixed>
+     * @return list<scalar|null>
      */
     private function alignRow(array $values): array
     {
@@ -345,14 +360,23 @@ final class ClickHouseRowStream
 
     /**
      * A Bool column arrives as a JSON boolean while it is published as text, and a PHP cast would turn
-     * false into an empty string.
+     * false into an empty string. Numbers keep the shape the parsing gave them: a whole number and a
+     * decimal both arrive as exact text and a cast would round them away. Only a value that has no scalar
+     * form at all, the one of an Array or a Map column, becomes text, and such a column is described as a
+     * string anyway.
      */
-    private static function normalizeValue(mixed $value): mixed
+    private static function normalizeValue(mixed $value): string|int|float|null
     {
         if (is_bool($value)) {
             return $value ? 'true' : 'false';
         }
 
-        return $value;
+        if ($value === null || is_scalar($value)) {
+            return $value;
+        }
+
+        $encoded = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        return $encoded === false ? null : $encoded;
     }
 }

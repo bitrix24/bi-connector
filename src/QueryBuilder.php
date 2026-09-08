@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App;
 
+use App\DataSource\RowLimit;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Query\QueryBuilder as DBALQueryBuilder;
 use Psr\Log\LoggerInterface;
@@ -12,11 +13,13 @@ class QueryBuilder
 {
     private Connection $connection;
     private LoggerInterface $logger;
+    private RowLimit $rowLimit;
 
-    public function __construct(Connection $connection, LoggerInterface $logger)
+    public function __construct(Connection $connection, LoggerInterface $logger, ?RowLimit $rowLimit = null)
     {
         $this->connection = $connection;
         $this->logger = $logger;
+        $this->rowLimit = $rowLimit ?? RowLimit::fromEnvironment();
 
         $this->logger->debug('QueryBuilder.__construct', [
             'class' => self::class,
@@ -70,10 +73,10 @@ class QueryBuilder
         // Apply filters
         $this->applyFilters($queryBuilder, $filter);
 
-        // Apply limit
-        if ($limit > 0) {
-            $queryBuilder->setMaxResults($limit);
-        }
+        // Apply limit. The driver collects the whole result before the first row is read, so the bound of
+        // the application is applied to every statement and a limit that is not positive means that bound
+        // and not the absence of one.
+        $queryBuilder->setMaxResults($this->rowLimit->resolve($limit));
 
         $sql = $queryBuilder->getSQL();
         $parameters = $queryBuilder->getParameters();

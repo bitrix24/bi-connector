@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace App\Tests\Unit;
 
+use App\DataSource\RowLimit;
 use App\QueryBuilder;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Query\QueryBuilder as DBALQueryBuilder;
 use Doctrine\DBAL\Result;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
@@ -122,6 +124,44 @@ class QueryBuilderTest extends TestCase
             [['ID', 'NAME'], [1, 'John'], [2, 'Jane']],
             iterator_to_array($generator, false)
         );
+    }
+
+    /**
+     * @return list<array{0: int, 1: int, 2: int}>
+     */
+    public static function rowLimitProvider(): array
+    {
+        return [
+            'a limit below the bound of the application is kept' => [100, 1000, 100],
+            'a limit above it is lowered to the bound' => [5000, 1000, 1000],
+            'a limit of zero means the bound and not the absence of one' => [0, 1000, 1000],
+            'a negative limit means the bound as well' => [-1, 1000, 1000],
+        ];
+    }
+
+    #[DataProvider('rowLimitProvider')]
+    public function testEveryStatementCarriesTheRowBoundOfTheApplication(
+        int $requestedLimit,
+        int $maximum,
+        int $expectedLimit
+    ): void {
+        $result = $this->createMock(Result::class);
+        $result->method('iterateAssociative')->willReturn(new \ArrayIterator([]));
+
+        $dbalQueryBuilder = $this->createMock(DBALQueryBuilder::class);
+        $dbalQueryBuilder->method('getSQL')->willReturn('SELECT * FROM orders');
+        $dbalQueryBuilder->method('getParameters')->willReturn([]);
+        $dbalQueryBuilder->expects($this->once())->method('setMaxResults')->with($expectedLimit);
+        $dbalQueryBuilder->method('executeQuery')->willReturn($result);
+
+        $this->connection->method('createQueryBuilder')->willReturn($dbalQueryBuilder);
+        $this->connection->method('quoteIdentifier')->willReturnCallback(
+            static fn (string $identifier): string => '`' . $identifier . '`'
+        );
+
+        $queryBuilder = new QueryBuilder($this->connection, $this->logger, new RowLimit($maximum));
+
+        iterator_to_array($queryBuilder->buildAndExecuteQuery('orders', [], [], $requestedLimit), false);
     }
 
     public function testQuoteIdentifier(): void

@@ -10,16 +10,44 @@ use PHPUnit\Framework\TestCase;
 
 class JsonRowsFileWriterTest extends TestCase
 {
+    private const ENVIRONMENT_VARIABLES = [
+        'ROWS_FILE_MAX_AGE_SECONDS',
+        'ROWS_FILE_SWEEP_PROBABILITY',
+        'ROWS_FILE_MAX_ROWS',
+        'ROWS_FILE_MAX_BYTES',
+        'MAX_RESULT_ROWS',
+    ];
+
     private string $directory;
+
+    /** @var array<string, mixed> */
+    private array $environmentBackup = [];
 
     protected function setUp(): void
     {
         $this->directory = sys_get_temp_dir() . '/biconnector_rows_test_' . uniqid();
         mkdir($this->directory, 0777, true);
+
+        foreach (self::ENVIRONMENT_VARIABLES as $name) {
+            $this->environmentBackup[$name] = $_ENV[$name] ?? null;
+            unset($_ENV[$name]);
+        }
     }
 
     protected function tearDown(): void
     {
+        foreach ($this->environmentBackup as $name => $value) {
+            if ($value === null) {
+                unset($_ENV[$name]);
+
+                continue;
+            }
+
+            $_ENV[$name] = $value;
+        }
+
+        $this->environmentBackup = [];
+
         foreach (glob($this->directory . '/*') ?: [] as $file) {
             unlink($file);
         }
@@ -42,6 +70,8 @@ class JsonRowsFileWriterTest extends TestCase
         touch($stale, time() - 7200);
         touch($foreign, time() - 7200);
 
+        $_ENV['ROWS_FILE_SWEEP_PROBABILITY'] = '1';
+
         $writer = new JsonRowsFileWriter($this->directory);
         $path = $writer->write($this->yieldRows([]));
 
@@ -59,21 +89,29 @@ class JsonRowsFileWriterTest extends TestCase
         file_put_contents($stale, '[]');
         touch($stale, time() - 7200);
 
-        $backup = $_ENV['ROWS_FILE_MAX_AGE_SECONDS'] ?? null;
         $_ENV['ROWS_FILE_MAX_AGE_SECONDS'] = '0';
+        $_ENV['ROWS_FILE_SWEEP_PROBABILITY'] = '1';
 
-        try {
-            $writer = new JsonRowsFileWriter($this->directory);
-            unlink($writer->write($this->yieldRows([])));
+        $writer = new JsonRowsFileWriter($this->directory);
+        unlink($writer->write($this->yieldRows([])));
 
-            $this->assertFileExists($stale);
-        } finally {
-            if ($backup === null) {
-                unset($_ENV['ROWS_FILE_MAX_AGE_SECONDS']);
-            } else {
-                $_ENV['ROWS_FILE_MAX_AGE_SECONDS'] = $backup;
-            }
-        }
+        $this->assertFileExists($stale);
+    }
+
+    public function testTheSweepDoesNotRunOnEveryRequest(): void
+    {
+        // Walking the directory costs as much as the number of files it holds, so the sweep is kept off
+        // the beginning of every request.
+        $stale = $this->directory . '/rows_stale';
+        file_put_contents($stale, '[]');
+        touch($stale, time() - 7200);
+
+        $_ENV['ROWS_FILE_SWEEP_PROBABILITY'] = (string)PHP_INT_MAX;
+
+        $writer = new JsonRowsFileWriter($this->directory);
+        unlink($writer->write($this->yieldRows([])));
+
+        $this->assertFileExists($stale);
     }
 
     public function testBodyMatchesJsonEncodeOfTheSameRows(): void
@@ -182,6 +220,65 @@ class JsonRowsFileWriterTest extends TestCase
         // Every row is on disk before the next one is pulled: nothing but the current row is held
         $this->assertSame([1, 7, 11, 15], $sizes);
         $this->assertSame(json_encode([['ID'], [1], [2], [3]]), file_get_contents($path));
+    }
+
+    public function testMoreRowsThanTheBoundaryFailTheWriting(): void
+    {
+        $_ENV['ROWS_FILE_MAX_ROWS'] = '3';
+
+        $writer = new JsonRowsFileWriter($this->directory);
+
+        try {
+            $writer->write($this->yieldRows([['ID'], [1], [2], [3]]));
+
+            $this->fail('Crossing the row boundary must fail the writing.');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('The answer carries more than the 3 rows the application writes.', $e->getMessage());
+        }
+
+        $this->assertSame([], glob($this->directory . '/*'), 'The partly written file must be dropped.');
+    }
+
+    public function testTheRowBoundaryFollowsTheRowLimitOfTheApplication(): void
+    {
+        // The file holds the rows the source is allowed to hand over and the row of column names above them
+        $_ENV['MAX_RESULT_ROWS'] = '2';
+
+        $writer = new JsonRowsFileWriter($this->directory);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('more than the 3 rows');
+
+        $writer->write($this->yieldRows([['ID'], [1], [2], [3]]));
+    }
+
+    public function testMoreBytesThanTheBoundaryFailTheWriting(): void
+    {
+        $_ENV['ROWS_FILE_MAX_BYTES'] = '16';
+
+        $writer = new JsonRowsFileWriter($this->directory);
+
+        try {
+            $writer->write($this->yieldRows([['ID'], ['x'], ['y'], ['z']]));
+
+            $this->fail('Crossing the size boundary must fail the writing.');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('The answer is longer than the 16 bytes the application writes.', $e->getMessage());
+        }
+
+        $this->assertSame([], glob($this->directory . '/*'), 'The partly written file must be dropped.');
+    }
+
+    public function testTheBoundariesOfTheFileAreTakenFromTheConstructorFirst(): void
+    {
+        $_ENV['ROWS_FILE_MAX_ROWS'] = '1000';
+
+        $writer = new JsonRowsFileWriter($this->directory, 2, 1024);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('more than the 2 rows');
+
+        $writer->write($this->yieldRows([['ID'], [1], [2]]));
     }
 
     private function writtenBytes(): int

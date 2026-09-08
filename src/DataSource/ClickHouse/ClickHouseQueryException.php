@@ -16,7 +16,10 @@ final class ClickHouseQueryException extends \RuntimeException
     // exception and the message. Matching the class loosely keeps the subclasses of DB::Exception, such as
     // DB::NetException, recognizable.
     private const FAILURE_TEXT_AT_START_PATTERN = '/^Code: \d+\. DB::\w*Exception/';
-    private const FAILURE_TEXT_PATTERN = '/Code: \d+\. DB::\w*Exception/';
+
+    // The opening of a line the output format has already begun to write: the display text of the failure
+    // replaces the answer and becomes the only value of the list.
+    private const JSON_LIST_PREFIX = '["';
 
     private const FAILURE_TEXT_MAX_LENGTH = 4096;
 
@@ -39,19 +42,49 @@ final class ClickHouseQueryException extends \RuntimeException
     }
 
     /**
-     * The text of a failure of ClickHouse carried somewhere inside a body, or null when the body carries
-     * none.
+     * The text of a failure of ClickHouse carried by the body of a failed answer, or null when the body
+     * carries none.
      *
-     * A statement that fails while its answer is still being put together is answered with the part of the
-     * result the server had already written and the display text of the failure after it, so the text is
-     * looked for and not expected at the start. Everything written before it stays inside the application.
+     * The body takes one of two shapes. A statement that fails before the output format has written
+     * anything is answered with the display text alone. A statement that fails once the format has already
+     * written its opening lines is answered with those lines and the display text as the only value of a
+     * JSON list after them. Both are read line by line and the text is pinned to the beginning of a line,
+     * so a text that travelled out inside the request and came back inside a body of a service that
+     * reflects what it is sent cannot pass for the reason of a failure.
      */
-    public static function findFailureText(string $body): ?string
+    public static function readFailureTextFromBody(string $body): ?string
     {
-        if (preg_match(self::FAILURE_TEXT_PATTERN, $body, $matches, PREG_OFFSET_CAPTURE) !== 1) {
-            return null;
+        foreach (preg_split('/\R/', $body) ?: [] as $line) {
+            $failureText = self::readFailureTextFromLine(trim($line));
+
+            if ($failureText !== null) {
+                return $failureText;
+            }
         }
 
-        return substr($body, (int)$matches[0][1], self::FAILURE_TEXT_MAX_LENGTH);
+        return null;
+    }
+
+    private static function readFailureTextFromLine(string $line): ?string
+    {
+        $failureText = self::readFailureText($line);
+
+        if ($failureText !== null) {
+            return $failureText;
+        }
+
+        $decoded = json_decode($line, true);
+
+        if (is_array($decoded) && array_is_list($decoded) && count($decoded) === 1 && is_string($decoded[0])) {
+            return self::readFailureText($decoded[0]);
+        }
+
+        // The body is read only up to a boundary, so a long display text may be cut in the middle and stop
+        // decoding as JSON. It still begins where the list does.
+        if (str_starts_with($line, self::JSON_LIST_PREFIX)) {
+            return self::readFailureText(substr($line, strlen(self::JSON_LIST_PREFIX)));
+        }
+
+        return null;
     }
 }
