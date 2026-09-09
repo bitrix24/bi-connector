@@ -12,7 +12,7 @@ class JsonRowsFileWriterTest extends TestCase
 {
     private const ENVIRONMENT_VARIABLES = [
         'ROWS_FILE_MAX_AGE_SECONDS',
-        'ROWS_FILE_SWEEP_PROBABILITY',
+        'ROWS_FILE_SWEEP_INTERVAL_SECONDS',
         'ROWS_FILE_MAX_ROWS',
         'ROWS_FILE_MAX_BYTES',
         'MAX_RESULT_ROWS',
@@ -70,7 +70,7 @@ class JsonRowsFileWriterTest extends TestCase
         touch($stale, time() - 7200);
         touch($foreign, time() - 7200);
 
-        $_ENV['ROWS_FILE_SWEEP_PROBABILITY'] = '1';
+        $_ENV['ROWS_FILE_SWEEP_INTERVAL_SECONDS'] = '0';
 
         $writer = new JsonRowsFileWriter($this->directory);
         $path = $writer->write($this->yieldRows([]));
@@ -90,7 +90,7 @@ class JsonRowsFileWriterTest extends TestCase
         touch($stale, time() - 7200);
 
         $_ENV['ROWS_FILE_MAX_AGE_SECONDS'] = '0';
-        $_ENV['ROWS_FILE_SWEEP_PROBABILITY'] = '1';
+        $_ENV['ROWS_FILE_SWEEP_INTERVAL_SECONDS'] = '0';
 
         $writer = new JsonRowsFileWriter($this->directory);
         unlink($writer->write($this->yieldRows([])));
@@ -98,20 +98,47 @@ class JsonRowsFileWriterTest extends TestCase
         $this->assertFileExists($stale);
     }
 
-    public function testTheSweepDoesNotRunOnEveryRequest(): void
+    public function testTheSweepDoesNotRunAgainInsideTheInterval(): void
     {
         // Walking the directory costs as much as the number of files it holds, so the sweep is kept off
         // the beginning of every request.
         $stale = $this->directory . '/rows_stale';
         file_put_contents($stale, '[]');
         touch($stale, time() - 7200);
+        touch($this->directory . '/sweep.marker');
 
-        $_ENV['ROWS_FILE_SWEEP_PROBABILITY'] = (string)PHP_INT_MAX;
+        $_ENV['ROWS_FILE_SWEEP_INTERVAL_SECONDS'] = '300';
 
         $writer = new JsonRowsFileWriter($this->directory);
         unlink($writer->write($this->yieldRows([])));
 
         $this->assertFileExists($stale);
+    }
+
+    public function testTheSweepRunsAgainOnceTheIntervalHasPassed(): void
+    {
+        // The interval is counted from the moment of the last sweep, so a rare stream of requests does
+        // not keep a file left behind for longer than the age at which it is removed.
+        $stale = $this->directory . '/rows_stale';
+        file_put_contents($stale, '[]');
+        touch($stale, time() - 7200);
+
+        $marker = $this->directory . '/sweep.marker';
+        touch($marker, time() - 600);
+
+        $_ENV['ROWS_FILE_SWEEP_INTERVAL_SECONDS'] = '300';
+
+        $writer = new JsonRowsFileWriter($this->directory);
+        unlink($writer->write($this->yieldRows([])));
+
+        clearstatcache();
+
+        $this->assertFileDoesNotExist($stale);
+        $this->assertGreaterThan(
+            time() - 300,
+            filemtime($marker),
+            'A sweep that ran records the moment it did.'
+        );
     }
 
     public function testBodyMatchesJsonEncodeOfTheSameRows(): void
@@ -199,7 +226,7 @@ class JsonRowsFileWriterTest extends TestCase
             $this->assertSame('Data source failure', $e->getMessage());
         }
 
-        $this->assertSame([], glob($this->directory . '/*'));
+        $this->assertSame([], $this->responseFiles());
     }
 
     public function testRowsAreWrittenWhileTheIteratorIsStillRunning(): void
@@ -236,7 +263,7 @@ class JsonRowsFileWriterTest extends TestCase
             $this->assertSame('The answer carries more than the 3 rows the application writes.', $e->getMessage());
         }
 
-        $this->assertSame([], glob($this->directory . '/*'), 'The partly written file must be dropped.');
+        $this->assertSame([], $this->responseFiles(), 'The partly written file must be dropped.');
     }
 
     public function testTheRowBoundaryFollowsTheRowLimitOfTheApplication(): void
@@ -266,7 +293,7 @@ class JsonRowsFileWriterTest extends TestCase
             $this->assertSame('The answer is longer than the 16 bytes the application writes.', $e->getMessage());
         }
 
-        $this->assertSame([], glob($this->directory . '/*'), 'The partly written file must be dropped.');
+        $this->assertSame([], $this->responseFiles(), 'The partly written file must be dropped.');
     }
 
     public function testTheBoundariesOfTheFileAreTakenFromTheConstructorFirst(): void
@@ -281,9 +308,17 @@ class JsonRowsFileWriterTest extends TestCase
         $writer->write($this->yieldRows([['ID'], [1], [2]]));
     }
 
+    /**
+     * @return list<string>
+     */
+    private function responseFiles(): array
+    {
+        return array_values(glob($this->directory . '/rows_*') ?: []);
+    }
+
     private function writtenBytes(): int
     {
-        $files = glob($this->directory . '/*') ?: [];
+        $files = $this->responseFiles();
 
         $this->assertCount(1, $files, 'The writer must work with exactly one temporary file');
 

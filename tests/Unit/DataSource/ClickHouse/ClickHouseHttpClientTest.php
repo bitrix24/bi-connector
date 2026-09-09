@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Tests\Unit\DataSource\ClickHouse;
 
 use App\DataSource\ClickHouse\ClickHouseHttpClient;
+use App\DataSource\RowLimit;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
@@ -216,7 +217,7 @@ class ClickHouseHttpClientTest extends TestCase
         $this->closeStream($client->query("SELECT name FROM system.columns WHERE database = 'analytics'"));
 
         $parameters = $this->requestParameters();
-        $this->assertSame('1000000', $parameters['max_result_rows']);
+        $this->assertSame((string)(new RowLimit(0))->getMaximum(), $parameters['max_result_rows']);
         $this->assertSame('100000000', $parameters['max_rows_to_read']);
         $this->assertSame('60', $parameters['max_execution_time']);
         $this->assertSame('throw', $parameters['result_overflow_mode']);

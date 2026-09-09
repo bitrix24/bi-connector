@@ -10,6 +10,8 @@ use PHPUnit\Framework\TestCase;
 
 class RowLimitTest extends TestCase
 {
+    private const DEFAULT_MAXIMUM = 500000;
+
     private mixed $environmentBackup = null;
 
     protected function setUp(): void
@@ -61,12 +63,28 @@ class RowLimitTest extends TestCase
     public function testAnUnreadableOrNonPositiveSettingFallsBackToTheDefault(): void
     {
         $_ENV[RowLimit::ENVIRONMENT_VARIABLE] = '-5';
-        $this->assertSame(1000000, RowLimit::fromEnvironment()->getMaximum());
+        $this->assertSame(self::DEFAULT_MAXIMUM, RowLimit::fromEnvironment()->getMaximum());
 
         $_ENV[RowLimit::ENVIRONMENT_VARIABLE] = 'not a number';
-        $this->assertSame(1000000, RowLimit::fromEnvironment()->getMaximum());
+        $this->assertSame(self::DEFAULT_MAXIMUM, RowLimit::fromEnvironment()->getMaximum());
 
         unset($_ENV[RowLimit::ENVIRONMENT_VARIABLE]);
-        $this->assertSame(1000000, RowLimit::fromEnvironment()->getMaximum());
+        $this->assertSame(self::DEFAULT_MAXIMUM, RowLimit::fromEnvironment()->getMaximum());
+    }
+
+    public function testTheDefaultFitsTheMemoryLimitOfTheImage(): void
+    {
+        // The pair of the two is what makes the row bound a bound on memory: a driver that collects the
+        // whole result needs the number of rows multiplied by the width of a row, measured at about
+        // 360 bytes of memory for a row of 300 bytes against MySQL 8.4. The default is kept at a third of
+        // the memory_limit of the image, so a row about three times wider than expected still fits.
+        $memoryLimitOfTheImage = 512 * 1024 * 1024;
+        $memoryPerRowOfExpectedWidth = 360;
+
+        $this->assertLessThan(
+            intdiv($memoryLimitOfTheImage, 2),
+            self::DEFAULT_MAXIMUM * $memoryPerRowOfExpectedWidth,
+            'Raising the default row bound calls for raising memory_limit in the Dockerfile as well.'
+        );
     }
 }

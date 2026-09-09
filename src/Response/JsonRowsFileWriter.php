@@ -22,9 +22,13 @@ class JsonRowsFileWriter
     private const DEFAULT_MAX_AGE_SECONDS = 3600;
 
     // Walking the directory costs as much as the number of files it holds, and the files pile up exactly
-    // when sending breaks off, that is under load. The sweep therefore runs on one request out of this
-    // many instead of at the beginning of every one; the age boundary above decides what it removes.
-    private const DEFAULT_SWEEP_PROBABILITY = 100;
+    // when sending breaks off, that is under load. The sweep therefore runs at most once in this many
+    // seconds instead of at the beginning of every request; the age boundary above decides what it removes.
+    private const DEFAULT_SWEEP_INTERVAL_SECONDS = 300;
+
+    // The moment of the last sweep is kept in the modification time of this file, next to the response
+    // files themselves.
+    private const SWEEP_MARKER_FILE = 'sweep.marker';
 
     // Boundaries on the file itself. The rows the source hands over are bounded by the row limit of the
     // application, the header row above them; the size is bounded on its own, because the width of a row
@@ -110,7 +114,7 @@ class JsonRowsFileWriter
     {
         $maxAge = (int)($_ENV['ROWS_FILE_MAX_AGE_SECONDS'] ?? self::DEFAULT_MAX_AGE_SECONDS);
 
-        if ($maxAge <= 0 || !self::sweepsThisTime()) {
+        if ($maxAge <= 0 || !$this->sweepsThisTime()) {
             return;
         }
 
@@ -136,16 +140,34 @@ class JsonRowsFileWriter
     }
 
     /**
-     * Whether this request is the one that sweeps.
+     * Whether enough time has passed since the last sweep.
+     *
+     * The interval is measured against the moment of the last sweep and not against a count of requests:
+     * a count ties the lifetime of a file left behind to how busy the application is, so under a rare
+     * stream of requests a file of an hour of age would stay for days.
      */
-    private static function sweepsThisTime(): bool
+    private function sweepsThisTime(): bool
     {
-        $probability = self::readBoundaryFromEnvironment(
-            'ROWS_FILE_SWEEP_PROBABILITY',
-            self::DEFAULT_SWEEP_PROBABILITY
-        );
+        $interval = (int)($_ENV['ROWS_FILE_SWEEP_INTERVAL_SECONDS'] ?? self::DEFAULT_SWEEP_INTERVAL_SECONDS);
 
-        return random_int(1, $probability) === 1;
+        if ($interval <= 0) {
+            return true;
+        }
+
+        $marker = $this->directory . '/' . self::SWEEP_MARKER_FILE;
+        // The file may be taken away between the reading of its age and the next request, so the reading
+        // is not allowed to raise here.
+        $sweptAt = @filemtime($marker);
+
+        if ($sweptAt !== false && $sweptAt > time() - $interval) {
+            return false;
+        }
+
+        // The marker is moved before the walk rather than after it, so that requests arriving while the
+        // walk is running do not start one of their own.
+        @touch($marker);
+
+        return true;
     }
 
     /**

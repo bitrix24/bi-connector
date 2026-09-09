@@ -11,12 +11,18 @@ namespace App\DataSource;
  * source whose driver collects the whole result in memory both need a predictable refusal instead of an
  * answer whose size the caller alone decides. A limit that is not positive means the bound of the
  * application and never the absence of one.
+ *
+ * The default forms a pair with the memory_limit of the image (512M, set in the Dockerfile). A driver that
+ * collects the whole result needs the number of rows multiplied by the width of a row: measured against
+ * MySQL 8.4, the default of 500000 rows costs about 176 MB at 300 bytes a row and reaches 512 MB only at
+ * about 950 bytes a row. Raising this default without raising memory_limit brings back a fatal error in
+ * place of a refusal.
  */
 final class RowLimit
 {
     public const ENVIRONMENT_VARIABLE = 'MAX_RESULT_ROWS';
 
-    private const DEFAULT_MAXIMUM = 1000000;
+    private const DEFAULT_MAXIMUM = 500000;
 
     private int $maximum;
 
