@@ -145,6 +145,26 @@ class SecretMaskingProcessorTest extends TestCase
         $this->assertSame([], $this->process([])->context);
     }
 
+    public function testTheImageKeepsTheArgumentsOfAFrameOutOfATrace(): void
+    {
+        // The processor masks the context of a record and does not reach into a stack trace, which is
+        // written to the log on every failure. Keeping the arguments of a frame out of the trace is what
+        // the image is left to do, and the built-in default of PHP does the opposite.
+        $path = dirname(__DIR__, 3) . '/Dockerfile';
+        $contents = is_readable($path) ? file_get_contents($path) : false;
+
+        if ($contents === false) {
+            $this->fail('The Dockerfile of the image is not readable at ' . $path . '.');
+        }
+
+        $this->assertMatchesRegularExpression(
+            '/zend\.exception_ignore_args\s*=\s*On/i',
+            $contents,
+            'The image has to keep the arguments of a frame out of a trace, or a secret passed to a '
+            . 'frame reaches the log in clear text.'
+        );
+    }
+
     /**
      * @param array<array-key, mixed> $context
      */

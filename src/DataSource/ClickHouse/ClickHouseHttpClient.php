@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\DataSource\ClickHouse;
 
+use App\Config\Boundary;
 use App\DataSource\RowLimit;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpClient\HttpClient;
@@ -81,15 +82,15 @@ final class ClickHouseHttpClient
         $this->httpClient = $httpClient ?? HttpClient::create();
 
         $this->rowLimit = RowLimit::fromEnvironment();
-        $this->maxRowsToRead = self::readBoundaryFromEnvironment(
+        $this->maxRowsToRead = Boundary::readPositiveInt(
             'CLICKHOUSE_MAX_ROWS_TO_READ',
             self::DEFAULT_MAX_ROWS_TO_READ
         );
-        $this->maxExecutionTime = self::readBoundaryFromEnvironment(
+        $this->maxExecutionTime = Boundary::readPositiveInt(
             'CLICKHOUSE_MAX_EXECUTION_TIME',
             self::DEFAULT_MAX_EXECUTION_TIME
         );
-        $this->checkTimeout = self::readBoundaryFromEnvironment(
+        $this->checkTimeout = Boundary::readPositiveInt(
             'CLICKHOUSE_CHECK_TIMEOUT_SECONDS',
             self::DEFAULT_CHECK_TIMEOUT_SECONDS
         );
@@ -106,10 +107,13 @@ final class ClickHouseHttpClient
     }
 
     /**
-     * The row limit actually applied to a statement: the caller asks for one, the application caps it.
+     * The row limit actually applied to a statement: the caller asks for one, the application answers with
+     * the number a statement runs with or refuses the request.
      *
      * The value is public because the same number belongs both to `max_result_rows` and to the `LIMIT`
-     * clause of the statement; a `LIMIT` above the cap would fail the statement instead of shortening it.
+     * clause of the statement; a `LIMIT` above the bound would fail the statement instead of shortening it.
+     *
+     * @throws \InvalidArgumentException when the request asks for more rows than the application returns
      */
     public function resolveRowLimit(int $requestedLimit): int
     {
@@ -201,8 +205,14 @@ final class ClickHouseHttpClient
     }
 
     /**
-     * The connection form asks for a single address string, so the host setting may carry a scheme and a
-     * port. Neither the user name nor the password ever reaches the address: both travel as headers.
+     * The endpoint of the source, assembled out of the settings of the connection.
+     *
+     * The address may carry a scheme, a port and a path of its own, because the HTTP interface of a source
+     * is commonly published behind a proxy under a path prefix; the path is kept, so such a source is
+     * reachable. The port is taken from the address first and from the `port` setting of the connection
+     * afterwards -- the form asks for both and the more specific of the two wins -- and the default of the
+     * scheme applies when neither names one. Neither the user name nor the password ever reaches the
+     * address: both travel as headers.
      */
     private function buildBaseUrl(): string
     {
@@ -213,20 +223,29 @@ final class ClickHouseHttpClient
         }
 
         $parts = parse_url($host);
-        $hostName = is_array($parts) ? ($parts['host'] ?? '') : '';
+        $parts = is_array($parts) ? $parts : [];
+        $hostName = (string)($parts['host'] ?? '');
 
         if ($hostName === '') {
             throw new \InvalidArgumentException('ClickHouse connection has no readable host.');
         }
 
-        $scheme = strtolower(is_array($parts) ? ($parts['scheme'] ?? 'http') : 'http');
-        $port = is_array($parts) ? (int)($parts['port'] ?? 0) : 0;
+        $scheme = strtolower((string)($parts['scheme'] ?? 'http'));
+        $port = (int)($parts['port'] ?? 0);
+
+        if ($port <= 0) {
+            $port = (int)($this->connectionParams['port'] ?? 0);
+        }
 
         if ($port <= 0) {
             $port = $scheme === 'https' ? self::DEFAULT_SECURE_PORT : self::DEFAULT_PORT;
         }
 
-        return $scheme . '://' . $hostName . ':' . $port;
+        // The path of the endpoint carries no trailing separator of its own: the statement is sent to the
+        // root of the interface and the separator is written there.
+        $path = rtrim((string)($parts['path'] ?? ''), '/');
+
+        return $scheme . '://' . $hostName . ':' . $port . $path;
     }
 
     /**
@@ -328,16 +347,5 @@ final class ClickHouseHttpClient
         fclose($stream);
 
         return $body;
-    }
-
-    /**
-     * A boundary is never left unbounded: a missing, unreadable or non positive setting falls back to the
-     * default of the application.
-     */
-    private static function readBoundaryFromEnvironment(string $name, int $default): int
-    {
-        $value = (int)($_ENV[$name] ?? $default);
-
-        return $value > 0 ? $value : $default;
     }
 }

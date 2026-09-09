@@ -80,7 +80,56 @@ class ClickHouseHttpClientTest extends TestCase
                 'ch.example.com:9000',
                 'http://ch.example.com:9000/',
             ],
+            'a path of the address is kept' => [
+                'https://gateway.example.com/clickhouse/',
+                'https://gateway.example.com:8443/clickhouse/',
+            ],
         ];
+    }
+
+    /**
+     * @return list<array{0: string, 1: mixed, 2: string}>
+     */
+    public static function portSettingProvider(): array
+    {
+        return [
+            'the port setting is used when the address names none' => [
+                'ch.example.com',
+                '8124',
+                'http://ch.example.com:8124/',
+            ],
+            'the port of the address wins over the setting' => [
+                'ch.example.com:9000',
+                '8124',
+                'http://ch.example.com:9000/',
+            ],
+            'an empty port setting falls back to the default of the scheme' => [
+                'ch.example.com',
+                '',
+                'http://ch.example.com:8123/',
+            ],
+            'the secure default applies to a secure address without a port setting' => [
+                'https://ch.example.com',
+                '0',
+                'https://ch.example.com:8443/',
+            ],
+        ];
+    }
+
+    #[DataProvider('portSettingProvider')]
+    public function testThePortSettingOfTheConnectionIsUsed(
+        string $host,
+        mixed $port,
+        string $expectedEndpoint
+    ): void {
+        $client = $this->createClient($this->createCapturingTransport(), [
+            'host' => $host,
+            'port' => $port,
+        ]);
+
+        $this->closeStream($client->query('SELECT 1'));
+
+        $this->assertSame($expectedEndpoint, $this->requestEndpoint());
     }
 
     #[DataProvider('endpointProvider')]
@@ -171,17 +220,21 @@ class ClickHouseHttpClientTest extends TestCase
         $this->assertSame('15', $parameters['max_execution_time']);
     }
 
-    public function testRowLimitAboveTheApplicationCapIsLowered(): void
+    public function testRowLimitAboveTheApplicationBoundIsRefused(): void
     {
         $_ENV['MAX_RESULT_ROWS'] = '1000';
 
         $client = $this->createClient($this->createCapturingTransport());
 
-        $this->assertSame(1000, $client->resolveRowLimit(5000));
+        try {
+            $client->query('SELECT 1', 5000);
+            $this->fail('A row limit above the bound of the application must not be lowered silently.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('5000', $exception->getMessage());
+            $this->assertStringContainsString('1000', $exception->getMessage());
+        }
 
-        $this->closeStream($client->query('SELECT 1', 5000));
-
-        $this->assertSame('1000', $this->requestParameters()['max_result_rows']);
+        $this->assertNull($this->capturedRequest, 'A refused statement must not reach the source.');
     }
 
     public function testRowLimitBelowTheApplicationCapIsKept(): void

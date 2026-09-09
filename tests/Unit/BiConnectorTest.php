@@ -125,43 +125,6 @@ class BiConnectorTest extends TestCase
         }
     }
 
-    public function testCacheKeyGeneration(): void
-    {
-        $connector = new BiConnector($this->connectionParams, 'mysql', $this->logger);
-
-        // We can't directly test cache key generation since it's inside methods,
-        // but we can test that different parameters create different cache scenarios
-
-        // Test that tableName validation works
-        $response = $connector->getData('', [], [], 100);
-        $this->assertEquals(400, $response->getStatusCode());
-
-        $responseData = json_decode($response->getContent(), true);
-        $this->assertArrayHasKey('error', $responseData);
-        $this->assertEquals('Table name is required', $responseData['error']);
-    }
-
-    public function testErrorHandlingWithCaching(): void
-    {
-        $connector = new BiConnector($this->connectionParams, 'mysql', $this->logger);
-
-        // Test tableDescription with empty table name
-        $response = $connector->tableDescription('');
-        $this->assertEquals(400, $response->getStatusCode());
-
-        $responseData = json_decode($response->getContent(), true);
-        $this->assertArrayHasKey('error', $responseData);
-        $this->assertEquals('Table name is required', $responseData['error']);
-
-        // Test getData with empty table name
-        $response = $connector->getData('', [], [], 100);
-        $this->assertEquals(400, $response->getStatusCode());
-
-        $responseData = json_decode($response->getContent(), true);
-        $this->assertArrayHasKey('error', $responseData);
-        $this->assertEquals('Table name is required', $responseData['error']);
-    }
-
     public function testCacheKeyKeepsItsHistoricFormForWellFormedParameters(): void
     {
         $connectionParams = $this->uniqueConnectionParams();

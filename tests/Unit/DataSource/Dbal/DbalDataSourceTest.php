@@ -165,29 +165,68 @@ class DbalDataSourceTest extends TestCase
     }
 
     /**
-     * @return list<array{0: string, 1: string}>
+     * Every value that would add a parameter of its own to the DSN the driver writes. A semicolon
+     * separates the parameters of both DSNs; whitespace separates them only once the DSN of PostgreSQL is
+     * turned into the connection string of libpq, so those cases belong to that path.
+     *
+     * @return list<array{0: string, 1: string, 2: ConnectionType}>
      */
     public static function addressPartProvider(): array
     {
         return [
-            'a semicolon in the host' => ['host', 'db.example;unix_socket=/tmp/s'],
-            'a semicolon in the database name' => ['database', 'app;unix_socket=/tmp/s'],
-            'a blank in the host' => ['host', 'db.example host=evil'],
-            'a tab in the database name' => ['database', "app\tunix_socket=/tmp/s"],
+            'a semicolon in the host' => ['host', 'db.example;unix_socket=/tmp/s', ConnectionType::Mysql],
+            'a semicolon in the database name' => [
+                'database',
+                'app;unix_socket=/tmp/s',
+                ConnectionType::Mysql,
+            ],
+            'a semicolon in the host of postgresql' => [
+                'host',
+                'db.example;options=-c',
+                ConnectionType::Postgresql,
+            ],
+            'a blank in the host of postgresql' => [
+                'host',
+                'db.example host=evil',
+                ConnectionType::Postgresql,
+            ],
+            'a tab in the database name of postgresql' => [
+                'database',
+                "app\toptions=-c",
+                ConnectionType::Postgresql,
+            ],
+            'a null byte in the database name' => ['database', "app\0evil", ConnectionType::Mysql],
         ];
     }
 
     #[DataProvider('addressPartProvider')]
-    public function testAValueThatCanAddAParameterToTheDsnOfTheDriverIsRefused(string $name, string $value): void
-    {
+    public function testAValueThatCanAddAParameterToTheDsnOfTheDriverIsRefused(
+        string $name,
+        string $value,
+        ConnectionType $connectionType
+    ): void {
         $this->connectionParams[$name] = $value;
 
         $this->expectException(\InvalidArgumentException::class);
 
         $this->buildConnectionParams(
+            $this->createDataSource($connectionType),
+            $connectionType
+        );
+    }
+
+    public function testADatabaseNameCarryingABlankReachesTheDriverOnMysql(): void
+    {
+        // A blank is legitimate in the name of a MySQL database and separates nothing in the DSN of its
+        // driver, so refusing it used to break connections that had been working.
+        $this->connectionParams['database'] = 'sales 2024';
+
+        $params = $this->buildConnectionParams(
             $this->createDataSource(ConnectionType::Mysql),
             ConnectionType::Mysql
         );
+
+        $this->assertSame('sales 2024', $params['dbname']);
     }
 
     public function testCheckProbesTheConnectionWithASelectQuery(): void

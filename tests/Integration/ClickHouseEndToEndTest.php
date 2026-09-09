@@ -151,6 +151,24 @@ class ClickHouseEndToEndTest extends TestCase
         $this->assertSame([['ID'], [1]], $answer['body'], $answer['raw']);
     }
 
+    public function testDataRefusesARowLimitAboveTheBoundOfTheApplication(): void
+    {
+        // The portal asks for more rows than the application returns: the answer is a refusal naming both
+        // numbers, and never a shortened dataset under a successful status.
+        $answer = $this->call('data', [
+            'connection' => $this->connection(),
+            'table' => self::table(),
+            'select' => ['ID'],
+            'filter' => [],
+            'limit' => '100000000',
+        ]);
+
+        $this->assertSame(500, $answer['status'], $answer['raw']);
+        $error = (string)($answer['body']['error'] ?? '');
+        $this->assertStringContainsString('The request asks for 100000000 rows', $error, $answer['raw']);
+        $this->assertStringContainsString('which is above the', $error, $answer['raw']);
+    }
+
     public function testAnUnknownConnectionTypeIsRefused(): void
     {
         $answer = $this->call('check', ['connection' => $this->connection()], 'clickhouse-cluster');

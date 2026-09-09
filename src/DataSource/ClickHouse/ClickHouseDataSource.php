@@ -146,11 +146,14 @@ final class ClickHouseDataSource implements DataSourceInterface
      * @param array<string, mixed> $filter
      *
      * @return iterable<list<scalar|null>>
+     *
+     * @throws \InvalidArgumentException when the request asks for more rows than the application returns
      */
     public function fetchData(string $tableName, array $select, array $filter, int $limit): iterable
     {
-        // The transport caps the requested limit, and the same number belongs to the statement: a `LIMIT`
-        // above `max_result_rows` fails the statement instead of shortening it.
+        // A limit above the bound of the application is refused here, and the resolved number belongs to
+        // the statement as well: a `LIMIT` above `max_result_rows` fails the statement instead of
+        // shortening it.
         $rowLimit = $this->httpClient->resolveRowLimit($limit);
         $sql = $this->queryBuilder->buildSelect($tableName, $select, $filter, $rowLimit);
 

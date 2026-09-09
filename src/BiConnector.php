@@ -178,19 +178,6 @@ class BiConnector
             'tableName' => $tableName
         ]);
 
-        if (empty($tableName)) {
-            $this->logger->warning('BiConnector.tableDescription.emptyTableName', [
-                'class' => self::class,
-                'method' => 'tableDescription'
-            ]);
-
-            return new Response(
-                json_encode(['error' => 'Table name is required']) ?: '{"error":"Table name is required"}',
-                400,
-                ['Content-Type' => 'application/json']
-            );
-        }
-
         try {
             $cacheKey = $this->buildCacheKey('table_desc_', $tableName);
             $cacheItem = $cacheKey === null ? null : $this->cache->getItem($cacheKey);
@@ -264,19 +251,6 @@ class BiConnector
             'filterCount' => count($filter),
             'limit' => $limit
         ]);
-
-        if (empty($tableName)) {
-            $this->logger->warning('BiConnector.getData.emptyTableName', [
-                'class' => self::class,
-                'method' => 'getData'
-            ]);
-
-            return new Response(
-                json_encode(['error' => 'Table name is required']) ?: '{"error":"Table name is required"}',
-                400,
-                ['Content-Type' => 'application/json']
-            );
-        }
 
         $filePath = null;
 

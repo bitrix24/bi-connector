@@ -133,7 +133,6 @@ class QueryBuilderTest extends TestCase
     {
         return [
             'a limit below the bound of the application is kept' => [100, 1000, 100],
-            'a limit above it is lowered to the bound' => [5000, 1000, 1000],
             'a limit of zero means the bound and not the absence of one' => [0, 1000, 1000],
             'a negative limit means the bound as well' => [-1, 1000, 1000],
         ];
@@ -162,6 +161,24 @@ class QueryBuilderTest extends TestCase
         $queryBuilder = new QueryBuilder($this->connection, $this->logger, new RowLimit($maximum));
 
         iterator_to_array($queryBuilder->buildAndExecuteQuery('orders', [], [], $requestedLimit), false);
+    }
+
+    public function testALimitAboveTheBoundOfTheApplicationRefusesTheStatement(): void
+    {
+        $dbalQueryBuilder = $this->createMock(DBALQueryBuilder::class);
+        $dbalQueryBuilder->expects($this->never())->method('executeQuery');
+
+        $this->connection->method('createQueryBuilder')->willReturn($dbalQueryBuilder);
+        $this->connection->method('quoteIdentifier')->willReturnCallback(
+            static fn (string $identifier): string => '`' . $identifier . '`'
+        );
+
+        $queryBuilder = new QueryBuilder($this->connection, $this->logger, new RowLimit(1000));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('The request asks for 5000 rows, which is above the 1000 rows');
+
+        iterator_to_array($queryBuilder->buildAndExecuteQuery('orders', [], [], 5000), false);
     }
 
     public function testQuoteIdentifier(): void

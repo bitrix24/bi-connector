@@ -54,15 +54,20 @@ final class ConnectorApiClient
     /**
      * Connectors the portal already holds for this application.
      *
-     * @return list<array<string, mixed>>
+     * A portal that holds none answers with an empty list, and a portal that could not be reached answers
+     * nothing at all. The two are told apart here, because taking the second for the first is what makes
+     * the registration add every connector a second time.
+     *
+     * @return list<array<string, mixed>>|null the catalogue, or null when the portal did not answer with
+     *         a readable one
      */
-    public function getConnectors(): array
+    public function getConnectors(): ?array
     {
         $decoded = $this->call(self::METHOD_LIST, []);
         $result = $decoded['result'] ?? null;
 
         if (!is_array($result)) {
-            return [];
+            return null;
         }
 
         $connectors = [];

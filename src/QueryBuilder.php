@@ -74,8 +74,8 @@ class QueryBuilder
         $this->applyFilters($queryBuilder, $filter);
 
         // Apply limit. The driver collects the whole result before the first row is read, so the bound of
-        // the application is applied to every statement and a limit that is not positive means that bound
-        // and not the absence of one.
+        // the application is applied to every statement: a limit that is not positive means that bound and
+        // not the absence of one, and a limit above it is refused instead of being lowered silently.
         $queryBuilder->setMaxResults($this->rowLimit->resolve($limit));
 
         $sql = $queryBuilder->getSQL();

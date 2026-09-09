@@ -460,6 +460,13 @@ class ConnectorRegistrationTest extends TestCase
         $this->assertSame('13', $this->catalogueChanges[2]['id'], 'ClickHouse is found by its source family');
     }
 
+    public function testACatalogueThatCannotBeReadLeavesThePortalUntouched(): void
+    {
+        $this->runRegistration(self::BASE_FIELD_NAMES, null);
+
+        $this->assertSame([], $this->catalogueChanges);
+    }
+
     public function testAnOlderPortalKeepsUpdatingTheConnectorsItAlreadyHolds(): void
     {
         $this->runRegistration(
@@ -616,9 +623,10 @@ class ConnectorRegistrationTest extends TestCase
      *
      * @param list<string>|string|null $portalFields names the portal accepts, a raw answer body, or null
      *        for a portal that cannot be reached at all
-     * @param list<array<string, mixed>> $existingConnectors catalogue the portal already holds
+     * @param list<array<string, mixed>>|null $existingConnectors catalogue the portal already holds, or
+     *        null for a portal that does not answer with one at all
      */
-    private function runRegistration(array|string|null $portalFields, array $existingConnectors = []): void
+    private function runRegistration(array|string|null $portalFields, ?array $existingConnectors = []): void
     {
         $transport = new MockHttpClient(
             function (
@@ -630,6 +638,10 @@ class ConnectorRegistrationTest extends TestCase
                 $existingConnectors
             ): MockResponse {
                 if (str_ends_with($url, ConnectorApiClient::METHOD_LIST)) {
+                    if ($existingConnectors === null) {
+                        throw new TransportException('Could not resolve host: portal.bitrix24.ru');
+                    }
+
                     return $this->answering(['result' => $existingConnectors]);
                 }
 

@@ -161,6 +161,18 @@ class Application
         $connectorsToRegister = self::buildConnectorDescriptions();
         $existingConnectors = $apiClient->getConnectors();
 
+        // A portal that did not answer with its catalogue tells nothing about what it already holds.
+        // Registering against that silence adds every connector a second time, so the catalogue is left
+        // untouched instead and the installation is repeated once the portal answers again.
+        if ($existingConnectors === null) {
+            self::getLog()->error('Application.registerConnectors.catalogueUnavailable', [
+                'method' => ConnectorApiClient::METHOD_LIST,
+                'connectorsToRegister' => count($connectorsToRegister),
+            ]);
+
+            return;
+        }
+
         // A field the portal does not know fails the whole call and would take the connectors that do
         // work down with it, so the accepted set is read before anything is sent.
         $portalFieldNames = $apiClient->getSupportedFieldNames();

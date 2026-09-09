@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\DataSource\ClickHouse;
 
+use App\Config\Boundary;
 use App\DataSource\RowLimit;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -67,16 +68,16 @@ final class ClickHouseRowStream
 
         $this->stream = $stream;
         $this->logger = $logger ?? new NullLogger();
-        $this->maxLineBytes = self::readBoundaryFromEnvironment(
+        $this->maxLineBytes = Boundary::readPositiveInt(
             'CLICKHOUSE_MAX_LINE_BYTES',
             self::DEFAULT_MAX_LINE_BYTES
         );
         $this->maxResultRows = RowLimit::fromEnvironment()->getMaximum();
-        $this->expectedRowBytes = self::readBoundaryFromEnvironment(
+        $this->expectedRowBytes = Boundary::readPositiveInt(
             'CLICKHOUSE_EXPECTED_ROW_BYTES',
             self::DEFAULT_EXPECTED_ROW_BYTES
         );
-        $this->maxResponseBytes = self::readBoundaryFromEnvironment(
+        $this->maxResponseBytes = Boundary::readPositiveInt(
             'CLICKHOUSE_MAX_RESPONSE_BYTES',
             $this->maxResultRows * $this->expectedRowBytes
         );
@@ -133,7 +134,7 @@ final class ClickHouseRowStream
             return null;
         }
 
-        return $this->alignRow($this->decodeLine($line));
+        return $this->alignRow($this->decodeLine($line, count($this->columnNames)));
     }
 
     /**
@@ -168,7 +169,7 @@ final class ClickHouseRowStream
             throw new ClickHouseQueryException(sprintf('The answer of ClickHouse carries no %s.', $expected));
         }
 
-        $decoded = $this->decodeLine($line);
+        $decoded = $this->decodeLine($line, null);
         $names = [];
 
         foreach ($decoded as $name) {
@@ -188,16 +189,27 @@ final class ClickHouseRowStream
      *
      * A failure that the server appends to an answer it has already started to send reaches the body in
      * two shapes. An unreadable line is one of them. The other one is a readable JSON list holding the
-     * message of the failure alone, which no data row of this answer format looks like: a data row always
-     * carries a value per column, and a value of a source never begins with the display text of a
-     * ClickHouse exception. Taking such a line for data is what hands a truncated answer to the portal
-     * under a successful status, so the message wins over the shape of the line.
+     * message of the failure alone. Taking such a line for data is what hands a truncated answer to the
+     * portal under a successful status, so a line of a single value is read as a failure as soon as it
+     * carries the display text of a ClickHouse exception.
+     *
+     * How far that reading is certain depends on the width of the answer. Under a header of more than one
+     * column a list of a single value is no data row at all -- this format writes a value per column --
+     * so such a line ends the reading whatever it carries. Under a header of exactly one column the
+     * failure has the width of a data row, and the body holds nothing else to tell the two apart: the
+     * answer already carries the successful status and its headers, and a run against 24.8 shows the
+     * appended reason arriving inside a body that ends as a complete one, with neither
+     * `X-ClickHouse-Exception-Code` nor any other trailer after it. A single column answer whose values
+     * are themselves ClickHouse failure texts -- a table of stored log messages -- therefore ends with
+     * such a value reported as a failure. The limitation is written down in the README.
+     *
+     * @param int|null $columnCount width of the answer, or null while the header itself is being read
      *
      * @return list<mixed>
      *
      * @throws ClickHouseQueryException
      */
-    private function decodeLine(string $line): array
+    private function decodeLine(string $line, ?int $columnCount): array
     {
         $values = json_decode($line, true, self::JSON_DEPTH, JSON_BIGINT_AS_STRING);
 
@@ -211,6 +223,10 @@ final class ClickHouseRowStream
             $this->close();
 
             throw new ClickHouseQueryException($message);
+        }
+
+        if ($columnCount !== null && $columnCount > 1 && count($values) === 1) {
+            $this->failOnUnreadableLine($line);
         }
 
         return $values;
@@ -259,9 +275,9 @@ final class ClickHouseRowStream
         $line = '';
 
         while ($this->stream !== null) {
-            $chunk = fgets($this->stream, self::READ_CHUNK_BYTES + 1);
+            $chunk = $this->readChunk();
 
-            if ($chunk === false) {
+            if ($chunk === null) {
                 return $line === '' ? null : $line;
             }
 
@@ -298,6 +314,53 @@ final class ClickHouseRowStream
     }
 
     /**
+     * Reads the next piece of the body, telling the end of the data apart from a failure of the reading.
+     *
+     * A connection that is lost while the answer is still arriving reaches the reader the only way a stream
+     * wrapper can report it: `fgets()` hands back false and a warning is raised, and the stream calls itself
+     * exhausted afterwards exactly as it does at the end of a complete body. Reading that as the end of the
+     * data is what hands a truncated answer to the caller under a successful status, so the warning is what
+     * the two are told apart by: it is caught for the length of the read alone and turns into a failure of
+     * the statement.
+     *
+     * @return string|null the piece that was read, or null once the body is exhausted
+     *
+     * @throws ClickHouseQueryException when the body could not be read to its end
+     */
+    private function readChunk(): ?string
+    {
+        $stream = $this->stream;
+
+        if ($stream === null) {
+            return null;
+        }
+
+        $failure = null;
+        set_error_handler(static function (int $severity, string $message) use (&$failure): bool {
+            $failure = $message;
+
+            return true;
+        });
+
+        try {
+            $chunk = fgets($stream, self::READ_CHUNK_BYTES + 1);
+        } finally {
+            restore_error_handler();
+        }
+
+        if ($failure !== null) {
+            $this->close();
+
+            throw new ClickHouseQueryException(sprintf(
+                'The answer of ClickHouse broke off before its end: %s',
+                $failure
+            ));
+        }
+
+        return $chunk === false ? null : $chunk;
+    }
+
+    /**
      * Stops the reading over a line that is not a row of the answer.
      *
      * A failure that ClickHouse writes as plain text is recognized by its display text and is handed back
@@ -324,17 +387,6 @@ final class ClickHouseRowStream
         ]);
 
         throw new ClickHouseQueryException('The answer of ClickHouse could not be read.');
-    }
-
-    /**
-     * A boundary is never left unbounded: a missing, unreadable or non positive setting falls back to the
-     * default of the application.
-     */
-    private static function readBoundaryFromEnvironment(string $name, int $default): int
-    {
-        $value = (int)($_ENV[$name] ?? $default);
-
-        return $value > 0 ? $value : $default;
     }
 
     /**

@@ -8,6 +8,10 @@ use App\DataSource\ClickHouse\ClickHouseQueryException;
 use App\DataSource\ClickHouse\ClickHouseRowStream;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\HttpClient\Exception\TransportException;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
+use Symfony\Component\HttpClient\Response\StreamWrapper;
 
 class ClickHouseRowStreamTest extends TestCase
 {
@@ -272,6 +276,24 @@ class ClickHouseRowStreamTest extends TestCase
 
         self::assertSame([$value], $rows->fetchRow());
         self::assertNull($rows->fetchRow());
+    }
+
+    public function testALineOfOneValueUnderAWiderHeaderIsNoRowOfData(): void
+    {
+        // This answer format writes a value per column, so a list of a single value under a header of two
+        // columns is not a row the source holds. It used to be filled up with nulls and handed out as one.
+        $stream = self::streamOf(
+            '["id","message"]' . "\n"
+            . '["UInt32","String"]' . "\n"
+            . '["something the source did not write as a row"]' . "\n"
+        );
+
+        $rows = new ClickHouseRowStream($stream);
+
+        $this->expectException(ClickHouseQueryException::class);
+        $this->expectExceptionMessage('The answer of ClickHouse could not be read.');
+
+        $rows->fetchRow();
     }
 
     public function testAFailureTextInsideAWiderRowStaysData(): void
@@ -592,6 +614,59 @@ class ClickHouseRowStreamTest extends TestCase
         ));
 
         self::assertSame([1, '["alpha","beta"]'], $rows->fetchRow());
+    }
+
+    public function testAConnectionLostInTheMiddleOfTheAnswerIsNotTheEndOfTheData(): void
+    {
+        // The rows already read are complete, and the connection is then lost: the wrapper of the transport
+        // hands back false and calls the stream exhausted, which used to end the reading as a success and
+        // hand the rows read so far to the portal under status 200.
+        $rows = new ClickHouseRowStream(self::streamOfTransport(
+            '["id"]' . "\n" . '["UInt32"]' . "\n" . '[1]' . "\n",
+            'connection reset by peer'
+        ));
+
+        self::assertSame([1], $rows->fetchRow());
+
+        try {
+            $rows->fetchRow();
+            self::fail('A lost connection must not pass for the end of the data.');
+        } catch (ClickHouseQueryException $exception) {
+            self::assertStringContainsString('broke off before its end', $exception->getMessage());
+            self::assertStringContainsString('connection reset by peer', $exception->getMessage());
+        }
+    }
+
+    public function testAConnectionLostBeforeTheHeaderIsReported(): void
+    {
+        $this->expectException(ClickHouseQueryException::class);
+        $this->expectExceptionMessage('broke off before its end');
+
+        new ClickHouseRowStream(self::streamOfTransport('', 'connection reset by peer'));
+    }
+
+    /**
+     * A body that arrives over the transport of the application and breaks off in the middle.
+     *
+     * @return resource
+     */
+    private static function streamOfTransport(string $body, string $failure)
+    {
+        $chunks = (static function () use ($body, $failure): \Generator {
+            if ($body !== '') {
+                yield $body;
+            }
+
+            throw new TransportException($failure);
+        })();
+
+        $httpClient = new MockHttpClient(new MockResponse($chunks));
+        $response = $httpClient->request('POST', 'http://clickhouse.example/', ['buffer' => false]);
+
+        $stream = StreamWrapper::createResource($response, $httpClient);
+        self::assertIsResource($stream);
+
+        return $stream;
     }
 
     public function testAClosedResourceIsRefused(): void

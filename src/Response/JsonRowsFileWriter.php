@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Response;
 
+use App\Config\Boundary;
 use App\DataSource\RowLimit;
 
 /**
@@ -44,11 +45,11 @@ class JsonRowsFileWriter
     public function __construct(string $directory, ?int $maxRows = null, ?int $maxBytes = null)
     {
         $this->directory = $directory;
-        $this->maxRows = $maxRows ?? self::readBoundaryFromEnvironment(
+        $this->maxRows = $maxRows ?? Boundary::readPositiveInt(
             'ROWS_FILE_MAX_ROWS',
             RowLimit::fromEnvironment()->getMaximum() + 1
         );
-        $this->maxBytes = $maxBytes ?? self::readBoundaryFromEnvironment(
+        $this->maxBytes = $maxBytes ?? Boundary::readPositiveInt(
             'ROWS_FILE_MAX_BYTES',
             self::DEFAULT_MAX_BYTES
         );
@@ -237,16 +238,5 @@ class JsonRowsFileWriter
         if ($written === false || $written < strlen($chunk)) {
             throw new \RuntimeException('Unable to write the response body to the temporary file');
         }
-    }
-
-    /**
-     * A boundary is never left unbounded: a missing, unreadable or non positive setting falls back to the
-     * default of the application.
-     */
-    private static function readBoundaryFromEnvironment(string $name, int $default): int
-    {
-        $value = (int)($_ENV[$name] ?? $default);
-
-        return $value > 0 ? $value : $default;
     }
 }

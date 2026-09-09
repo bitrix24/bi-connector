@@ -297,13 +297,38 @@ class ClickHouseQueryBuilderTest extends TestCase
             )
         );
 
-        foreach ($dataSource->fetchData('report', ['id'], [], 5000) as $row) {
+        foreach ($dataSource->fetchData('report', ['id'], [], 700) as $row) {
             $this->assertIsArray($row);
         }
 
         $this->assertNotNull($this->capturedRequest, 'No request reached the transport.');
-        $this->assertSame('SELECT `id` FROM `report` LIMIT 1000', $this->capturedRequest['options']['body']);
-        $this->assertSame('1000', $this->requestParameters()['max_result_rows']);
+        $this->assertSame('SELECT `id` FROM `report` LIMIT 700', $this->capturedRequest['options']['body']);
+        $this->assertSame('700', $this->requestParameters()['max_result_rows']);
+    }
+
+    public function testARequestAboveTheRowBoundNeverReachesTheSource(): void
+    {
+        $_ENV[self::ROW_LIMIT_VARIABLE] = '1000';
+
+        $dataSource = new ClickHouseDataSource(
+            ['host' => 'ch.example.com', 'database' => 'analytics'],
+            new NullLogger(),
+            new ClickHouseHttpClient(
+                ['host' => 'ch.example.com', 'database' => 'analytics'],
+                new NullLogger(),
+                $this->createCapturingTransport()
+            )
+        );
+
+        try {
+            iterator_to_array($dataSource->fetchData('report', ['id'], [], 5000), false);
+            $this->fail('A request above the row bound of the application must not be answered.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('5000', $exception->getMessage());
+            $this->assertStringContainsString('1000', $exception->getMessage());
+        }
+
+        $this->assertNull($this->capturedRequest, 'A refused request must not reach the source.');
     }
 
     private function createQueryBuilder(): ClickHouseQueryBuilder

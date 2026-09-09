@@ -40,7 +40,6 @@ class RowLimitTest extends TestCase
         return [
             'a limit below the bound is kept' => [700, 700],
             'a limit at the bound is kept' => [1000, 1000],
-            'a limit above the bound is lowered' => [5000, 1000],
             'zero means the bound' => [0, 1000],
             'a negative limit means the bound' => [-1, 1000],
         ];
@@ -52,6 +51,24 @@ class RowLimitTest extends TestCase
         int $expected
     ): void {
         $this->assertSame($expected, (new RowLimit(1000))->resolve($requestedLimit));
+    }
+
+    public function testALimitAboveTheBoundIsRefused(): void
+    {
+        // An answer shortened to the bound reaches the caller as a complete one, so the request is refused
+        // instead: a dataset that is silently incomplete is worse than one that is not delivered.
+        try {
+            (new RowLimit(1000))->resolve(5000);
+            $this->fail('A limit above the bound of the application must not be lowered silently.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('5000', $exception->getMessage());
+            $this->assertStringContainsString('1000', $exception->getMessage());
+            $this->assertStringContainsString(
+                RowLimit::ENVIRONMENT_VARIABLE,
+                $exception->getMessage(),
+                'The refusal names the setting the bound is raised with.'
+            );
+        }
     }
 
     public function testTheBoundIsReadFromTheEnvironment(): void

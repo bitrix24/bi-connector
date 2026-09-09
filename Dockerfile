@@ -21,16 +21,23 @@ RUN apt-get update && apt-get install -y \
     && docker-php-ext-install intl bcmath curl pdo pdo_mysql pdo_pgsql \
     && rm -rf /var/lib/apt/lists/*
 
-# Memory boundary of a request.
+# Settings of the runtime the base image does not carry: it loads no php.ini at all, so both settings
+# below stay at their built-in values without this file.
 #
-# The base image loads no php.ini at all, so without this file a request gets the built-in 128M. On the
-# MySQL and PostgreSQL paths the driver collects the whole result before the first row is read, so the
-# memory a request needs is the row limit of the application multiplied by the width of a row: at the
-# default MAX_RESULT_ROWS of 500000 a row of 300 bytes costs about 176 MB and a row of 900 bytes about
-# 476 MB. The two settings are one pair -- raising MAX_RESULT_ROWS without raising this value turns the
-# row limit back into a limit that memory reaches first. The pair is tuned for rows up to about 900 bytes
-# wide; a deployment reading wider tables lowers MAX_RESULT_ROWS or raises this value.
-RUN echo 'memory_limit = 512M' > "$PHP_INI_DIR/conf.d/zz-app.ini"
+# Memory boundary of a request. The built-in value is 128M. On the MySQL and PostgreSQL paths the driver
+# collects the whole result before the first row is read, so the memory a request needs is the row limit
+# of the application multiplied by the width of a row: at the default MAX_RESULT_ROWS of 500000 a row of
+# 300 bytes costs about 176 MB and a row of 900 bytes about 476 MB. The two settings are one pair --
+# raising MAX_RESULT_ROWS without raising this value turns the row limit back into a limit that memory
+# reaches first. The pair is tuned for rows up to about 900 bytes wide; a deployment reading wider tables
+# lowers MAX_RESULT_ROWS or raises this value.
+#
+# Arguments left out of a stack trace. The built-in value is Off, which puts the arguments of every frame
+# into the trace, and a trace is written to the log on every failure. The processor that masks the
+# sensitive keys of a log context does not reach into a trace, so keeping the arguments out is what stops
+# a credential passed to a frame from being logged in clear text.
+RUN echo 'memory_limit = 512M' > "$PHP_INI_DIR/conf.d/zz-app.ini" \
+    && echo 'zend.exception_ignore_args = On' >> "$PHP_INI_DIR/conf.d/zz-app.ini"
 
 # Install Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer

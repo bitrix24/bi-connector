@@ -273,15 +273,17 @@ class ClickHouseIntegrationTest extends TestCase
         $this->assertCount(3, $rows);
     }
 
-    public function testFetchDataCapsTheRowLimitOfTheRequest(): void
+    public function testFetchDataRefusesARowLimitAboveTheBoundOfTheApplication(): void
     {
-        // The portal asks for more rows than the application allows: the cap wins and the answer is not
-        // an overflow failure.
+        // The portal asks for more rows than the application returns. Lowering the limit would answer with
+        // a part of the data under a successful status, so the request is refused and the reason names
+        // both numbers.
         $_ENV['MAX_RESULT_ROWS'] = '2';
 
-        $rows = $this->fetchRows(self::TYPES_TABLE, ['ID'], [], 1000);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('The request asks for 1000 rows, which is above the 2 rows');
 
-        $this->assertCount(3, $rows);
+        $this->fetchRows(self::TYPES_TABLE, ['ID'], [], 1000);
     }
 
     public function testResultRowsBoundaryFailsTheStatement(): void

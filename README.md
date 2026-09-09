@@ -47,6 +47,27 @@ tested. Boolean values are reported as `true` and `false` only for columns decla
 servers that store a boolean value in a `UInt8` column, the value is reported as an integer, because the
 column metadata does not tell a boolean carrier from a small integer.
 
+### ClickHouse Connection Address
+The `host` setting of a ClickHouse connection may carry a scheme, a port and a path of its own, because the
+HTTP interface of a source is commonly published behind a proxy under a path prefix. The path is kept, so
+`https://analytics.example.com/clickhouse` reaches the interface published under that prefix. The port is
+taken from the address first and from the separate `port` setting afterwards -- the more specific of the two
+wins -- and the default of the scheme applies when neither names one: 8123 for `http`, 8443 for `https`.
+Neither the user name nor the password is ever placed in the address: both travel as headers.
+
+### Failures ClickHouse Appends to an Answer
+A statement can fail after the server has already begun sending its answer. Such a failure arrives inside a
+body that carries a successful status, and the transport gives no sign of it: no distinct status code and no
+`X-ClickHouse-Exception-Code` header. The reader therefore recognises the failure by the answer itself and
+reports it instead of handing a truncated result to the portal.
+
+There is one case it cannot tell apart. Under a header of more than one column a line holding a single value
+is no data row and always ends the reading. Under a header of exactly one column an appended failure has the
+same width as a data row, so the reading falls back to the display text of a ClickHouse exception: a
+single-column answer whose values are themselves such texts -- a table of stored log messages, for instance
+-- ends with that value reported as a failure. Selecting an additional column, `SELECT id, message`, removes
+the ambiguity.
+
 ## Installation
 
 ### Prerequisites
@@ -112,6 +133,7 @@ Configure the application through the `.env` file:
 | `CACHE_TTL_TABLE_LIST` | Table list cache duration (seconds) | `3600` |
 | `CACHE_TTL_TABLE_DESCRIPTION` | Table structure cache duration (seconds) | `3600` |
 | `DB_CONNECTION_TIMEOUT` | Database connection timeout (seconds) | `30` |
+| `MAX_RESULT_ROWS` | Upper bound on the rows one answer may carry | `500000` |
 
 ### Bitrix24 Application Settings
 Required for REST API integration:
@@ -246,6 +268,11 @@ The application provides four main endpoints that are called by Bitrix24:
   ["value4", "value5", "value6"]
 ]
 ```
+
+The `limit` of the request is bounded by `MAX_RESULT_ROWS`. A request asking for more rows than that is
+refused with HTTP 500 and a body naming both numbers; it is not silently shortened, because an answer cut
+down to the bound carries no sign of being incomplete and would be taken for the whole of the data. A
+request naming no limit, or a limit that is not positive, is served with the bound of the application.
 
 ## Architecture
 

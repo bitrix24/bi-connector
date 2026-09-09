@@ -239,9 +239,9 @@ final class DbalDataSource implements DataSourceInterface
 
         return [
             'driver' => $driver,
-            'host' => $this->readAddressPart('host', 'localhost'),
+            'host' => $this->readAddressPart('host', 'localhost', $connectionType),
             'port' => $port,
-            'dbname' => $this->readAddressPart('database', ''),
+            'dbname' => $this->readAddressPart('database', '', $connectionType),
             'user' => (string)($this->connectionParams['username'] ?? ''),
             'password' => (string)($this->connectionParams['password'] ?? ''),
             'driverOptions' => [
@@ -252,16 +252,24 @@ final class DbalDataSource implements DataSourceInterface
     }
 
     /**
-     * The address and the name of the database are the two values the driver writes into its own DSN, where
-     * a semicolon separates the parameters and a blank separates them once the DSN of PostgreSQL is turned
-     * into a connection string. A value carrying one of them is refused instead of being passed on, so that
-     * no value can add a parameter of its own.
+     * The address and the name of the database are the two values the driver writes into its own DSN, so a
+     * value carrying a separator of that DSN is refused instead of being passed on: no value may add a
+     * parameter of its own.
+     *
+     * Which characters separate depends on the driver. Both DSNs are written as `key=value;` pairs, so a
+     * semicolon separates on either path, and a null byte ends the string the driver hands to the C
+     * library on either path as well. PostgreSQL has a second form on top of that: PDO turns its DSN into
+     * a connection string of libpq, where a blank -- and any other whitespace -- separates one parameter
+     * from the next, so whitespace is refused there too. MySQL has no such second form, and a name of a
+     * database carrying a blank is a legitimate one, so it is passed on.
      */
-    private function readAddressPart(string $name, string $default): string
+    private function readAddressPart(string $name, string $default, ConnectionType $connectionType): string
     {
         $value = (string)($this->connectionParams[$name] ?? $default);
 
-        if (preg_match('/[;\x00-\x20]/', $value) === 1) {
+        $separators = $connectionType === ConnectionType::Postgresql ? '/[;\x00\s]/' : '/[;\x00]/';
+
+        if (preg_match($separators, $value) === 1) {
             throw new \InvalidArgumentException(sprintf(
                 'The %s of the connection carries a character that is not allowed in an address.',
                 $name

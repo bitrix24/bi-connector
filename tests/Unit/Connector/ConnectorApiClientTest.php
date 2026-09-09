@@ -143,13 +143,20 @@ class ConnectorApiClientTest extends TestCase
         );
     }
 
-    public function testAnUnreadableListAnswerReportsAnEmptyCatalogue(): void
+    public function testAPortalHoldingNoConnectorsAnswersAnEmptyCatalogue(): void
+    {
+        $client = $this->createClient($this->answering(['result' => []]));
+
+        $this->assertSame([], $client->getConnectors());
+    }
+
+    public function testAnUnreadableListAnswerReportsNoCatalogueAtAll(): void
     {
         $client = $this->createClient(new MockHttpClient(static function (): MockResponse {
             throw new TransportException('Connection timed out');
         }));
 
-        $this->assertSame([], $client->getConnectors());
+        $this->assertNull($client->getConnectors());
     }
 
     public function testEveryMethodTravelsToItsOwnAddress(): void
