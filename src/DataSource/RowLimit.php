@@ -17,6 +17,12 @@ namespace App\DataSource;
  * MySQL 8.4, the default of 500000 rows costs about 176 MB at 300 bytes a row and reaches 512 MB only at
  * about 950 bytes a row. Raising this default without raising memory_limit brings back a fatal error in
  * place of a refusal.
+ *
+ * The pair is thus tuned for rows up to about 900 bytes wide. A source whose rows are wider -- a table
+ * carrying a description, a comment, an address or a JSON column -- needs this bound lowered through
+ * MAX_RESULT_ROWS, or the memory_limit of the image raised in the same proportion. The width
+ * CLICKHOUSE_EXPECTED_ROW_BYTES declares is a different quantity: it bounds the length of an answer of
+ * ClickHouse, a path that reads its answer line by line and holds no result in memory at all.
  */
 final class RowLimit
 {

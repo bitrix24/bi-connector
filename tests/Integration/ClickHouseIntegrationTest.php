@@ -351,16 +351,56 @@ class ClickHouseIntegrationTest extends TestCase
 
     public function testAFailureAppendedToASingleColumnAnswerBecomesAnError(): void
     {
-        // One column: the appended failure carries exactly as many values as a data row of this answer,
-        // so nothing but the message itself tells them apart. The server sends the header and appends the
-        // reason to it, which is the position a data row would take.
+        // One column: an appended failure carries exactly as many values as a data row of this answer, so
+        // nothing but the message itself tells them apart. Which of the two moments the server picks is
+        // its own decision -- it either refuses the request with a status, or answers successfully and
+        // puts the reason where a data row would stand -- so both shapes are accepted here and each is
+        // checked for what makes it correct. Reading a reason out of a body that is written in full is
+        // pinned by ClickHouseRowStreamTest; the live server answers here for the shape of the answer.
         $_ENV['MAX_RESULT_ROWS'] = '100000';
-        $handedOut = 0;
 
-        $this->expectException(ClickHouseQueryException::class);
-        $this->expectExceptionMessageMatches('/Limit for result exceeded/');
+        $client = new ClickHouseHttpClient($this->connectionParams(), new NullLogger());
 
-        $this->readRowsThroughStream('SELECT number FROM system.numbers LIMIT 200000', $handedOut);
+        try {
+            $stream = $client->query('SELECT number FROM system.numbers LIMIT 200000');
+        } catch (\RuntimeException $exception) {
+            // Refused with the status: the caller is told the display text of the source, and no line of
+            // the body carrying it travels out with the message.
+            $this->assertNotInstanceOf(ClickHouseQueryException::class, $exception);
+            $this->assertMatchesRegularExpression(
+                '/^ClickHouse answered with HTTP status \d+: Code: \d+\. DB::\w*Exception: '
+                . '.*Limit for result exceeded/',
+                $exception->getMessage()
+            );
+            $this->assertStringNotContainsString(
+                '["',
+                $exception->getMessage(),
+                'A line of the body of the answer must not travel out with the reason.'
+            );
+
+            return;
+        }
+
+        // Answered successfully: the reason arrives inside the body afterwards and must not pass for a
+        // row of data.
+        $columnNames = [];
+
+        try {
+            $rows = new ClickHouseRowStream($stream);
+            $columnNames = $rows->getColumnNames();
+
+            while ($rows->fetchRow() !== null) {
+                continue;
+            }
+
+            $this->fail('A failure appended to a single column answer must not pass for a row of data.');
+        } catch (ClickHouseQueryException $exception) {
+            $this->assertMatchesRegularExpression('/Limit for result exceeded/', $exception->getMessage());
+        }
+
+        if ($columnNames !== []) {
+            $this->assertSame(['number'], $columnNames, 'An answer of one column carries one name.');
+        }
     }
 
     public function testLargeResultKeepsTheMemoryFlatAndLeavesNoTemporaryFile(): void
@@ -427,23 +467,6 @@ class ClickHouseIntegrationTest extends TestCase
         }
 
         fclose($stream);
-    }
-
-    /**
-     * Reads the answer of a statement the way a request does: through the row reader.
-     *
-     * @param int $handedOut receives the number of rows the reader handed out, the rows read before a
-     *                       failure included
-     */
-    private function readRowsThroughStream(string $sql, int &$handedOut): void
-    {
-        $client = new ClickHouseHttpClient($this->connectionParams(), new NullLogger());
-        $rows = new ClickHouseRowStream($client->query($sql));
-        $handedOut = 0;
-
-        while ($rows->fetchRow() !== null) {
-            $handedOut++;
-        }
     }
 
     /**

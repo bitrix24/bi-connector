@@ -67,6 +67,17 @@ class JsonRowsFileWriter
     {
         $this->rowsWritten = 0;
         $this->bytesWritten = 0;
+
+        // A directory that cannot be written to is refused here instead of being handed to tempnam(),
+        // which falls back to the temporary directory of the system without saying so: the writing would
+        // succeed, but the files would pile up where the sweep never looks and the marker of the sweep
+        // cannot be written either, so every request would try to sweep again.
+        if (!is_writable($this->directory)) {
+            throw new \RuntimeException(
+                'The directory of the response files is not writable: ' . $this->directory
+            );
+        }
+
         $this->removeStaleFiles();
 
         $path = tempnam($this->directory, self::FILE_PREFIX);

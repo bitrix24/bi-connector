@@ -28,7 +28,8 @@ RUN apt-get update && apt-get install -y \
 # memory a request needs is the row limit of the application multiplied by the width of a row: at the
 # default MAX_RESULT_ROWS of 500000 a row of 300 bytes costs about 176 MB and a row of 900 bytes about
 # 476 MB. The two settings are one pair -- raising MAX_RESULT_ROWS without raising this value turns the
-# row limit back into a limit that memory reaches first.
+# row limit back into a limit that memory reaches first. The pair is tuned for rows up to about 900 bytes
+# wide; a deployment reading wider tables lowers MAX_RESULT_ROWS or raises this value.
 RUN echo 'memory_limit = 512M' > "$PHP_INI_DIR/conf.d/zz-app.ini"
 
 # Install Composer

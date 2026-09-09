@@ -308,6 +308,36 @@ class JsonRowsFileWriterTest extends TestCase
         $writer->write($this->yieldRows([['ID'], [1], [2]]));
     }
 
+    public function testADirectoryThatCannotBeWrittenToIsRefused(): void
+    {
+        chmod($this->directory, 0555);
+
+        if (is_writable($this->directory)) {
+            chmod($this->directory, 0777);
+            $this->markTestSkipped('PRECONDITION: the process writes into a directory of mode 0555.');
+        }
+
+        // Left to tempnam(), such a directory is silently replaced by the temporary directory of the
+        // system: the writing succeeds and the files stay there, where the sweep never looks.
+        $strayFilesBefore = glob(sys_get_temp_dir() . '/rows_*') ?: [];
+
+        try {
+            (new JsonRowsFileWriter($this->directory))->write($this->yieldRows([['ID'], [1]]));
+
+            $this->fail('A directory that cannot be written to must fail the writing.');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('not writable', $e->getMessage());
+        } finally {
+            chmod($this->directory, 0777);
+        }
+
+        $this->assertSame(
+            $strayFilesBefore,
+            glob(sys_get_temp_dir() . '/rows_*') ?: [],
+            'No response file may be written outside the directory the writer was given.'
+        );
+    }
+
     /**
      * @return list<string>
      */
