@@ -48,7 +48,7 @@ class ClickHouseDialectTest extends TestCase
             'trailing backslash' => ['value\\', "'value\\\\'"],
             'attempt to close the literal' => ["' OR 1 = 1 --", "'\\' OR 1 = 1 --'"],
             'attempt to escape the escaping' => ["\\' OR 1 = 1 --", "'\\\\\\' OR 1 = 1 --'"],
-            'unicode is untouched' => ['Привет', "'Привет'"],
+            'unicode is untouched' => ['Grüße 東京', "'Grüße 東京'"],
         ];
     }
 

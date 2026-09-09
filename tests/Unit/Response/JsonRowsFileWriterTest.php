@@ -205,7 +205,7 @@ class JsonRowsFileWriterTest extends TestCase
         return [
             'double quotes' => [[['NAME'], ['He said "hello"']]],
             'backslashes' => [[['PATH'], ['C:\\temp\\file']]],
-            'non ascii' => [[['NAME'], ['Компания «Пример»']]],
+            'non ascii' => [[['NAME'], ['Ærø & Co. «Grüße» 東京']]],
             'slashes and control characters' => [[['TEXT'], ["a/b\nc\td"]]],
             'mixed scalars' => [[['A', 'B', 'C', 'D'], [true, false, null, 1.0]]],
         ];
