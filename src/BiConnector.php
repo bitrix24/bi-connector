@@ -4,31 +4,46 @@ declare(strict_types=1);
 
 namespace App;
 
-use Doctrine\DBAL\Connection;
-use Doctrine\DBAL\DriverManager;
-use Doctrine\DBAL\Exception;
+use App\DataSource\DataSourceFactory;
+use App\DataSource\DataSourceInterface;
+use App\Response\JsonRowsFileWriter;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Cache\Adapter\FilesystemAdapter;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\Response;
 
 class BiConnector
 {
+    // An expired catalogue entry is dropped only when the same key is asked for again, so entries of
+    // connections nobody asks about any more stay on disk. Sweeping the whole store is a walk over the
+    // directory, so it runs on a small share of the requests of a rare action instead of on every one.
+    private const DEFAULT_CACHE_PRUNE_PROBABILITY = 100;
+
     private array $connectionParams;
     private string $connectionType;
     private LoggerInterface $logger;
-    private ?Connection $connection = null;
     private FilesystemAdapter $cache;
+    private string $cacheDir;
+    private DataSourceFactory $dataSourceFactory;
+    private ?DataSourceInterface $dataSource;
 
-    public function __construct(array $connectionParams, string $connectionType, LoggerInterface $logger)
-    {
+    public function __construct(
+        array $connectionParams,
+        string $connectionType,
+        LoggerInterface $logger,
+        ?DataSourceInterface $dataSource = null
+    ) {
         $this->logger = $logger;
         $this->connectionParams = $connectionParams;
         $this->connectionType = $connectionType;
+        $this->dataSourceFactory = new DataSourceFactory($logger);
+        $this->dataSource = $dataSource;
 
         // Initialize cache with proper directory creation
         $cacheDir = dirname(__DIR__) . '/cache';
         $this->initializeCacheDirectory($cacheDir);
 
+        $this->cacheDir = $cacheDir;
         $this->cache = new FilesystemAdapter('biconnector', 0, $cacheDir);
 
         $this->logger->debug('BiConnector.__construct', [
@@ -51,16 +66,11 @@ class BiConnector
         ]);
 
         try {
-            $connection = $this->getConnection();
-
-            // Test connection with a simple query
-            $result = $connection->executeQuery('SELECT 1 as test');
-            $testResult = $result->fetchAssociative();
+            $this->getDataSource()->check();
 
             $this->logger->info('BiConnector.check.success', [
                 'class' => self::class,
-                'method' => 'check',
-                'testResult' => $testResult
+                'method' => 'check'
             ]);
 
             return new Response(
@@ -99,12 +109,10 @@ class BiConnector
         ]);
 
         try {
-            $cacheKey = 'table_list_' . md5(
-                json_encode($this->connectionParams) . $this->connectionType . $searchString
-            );
-            $cacheItem = $this->cache->getItem($cacheKey);
+            $cacheKey = $this->buildCacheKey('table_list_', $searchString);
+            $cacheItem = $cacheKey === null ? null : $this->cache->getItem($cacheKey);
 
-            if ($cacheItem->isHit()) {
+            if ($cacheItem !== null && $cacheItem->isHit()) {
                 $tables = $cacheItem->get();
                 $this->logger->info('BiConnector.tableList.fromCache', [
                     'class' => self::class,
@@ -113,15 +121,18 @@ class BiConnector
                     'cacheKey' => $cacheKey
                 ]);
             } else {
-                $connection = $this->getConnection();
-                $tables = $this->fetchTables($connection, $searchString);
+                $tables = $this->getDataSource()->listTables($searchString);
 
                 // Cache for configured time
                 $ttl = (int)($_ENV['CACHE_TTL_TABLE_LIST'] ?? 3600);
-                $cacheItem->set($tables);
-                $cacheItem->expiresAfter($ttl);
+                $saved = false;
 
-                $saved = $this->cache->save($cacheItem);
+                if ($cacheItem !== null) {
+                    $cacheItem->set($tables);
+                    $cacheItem->expiresAfter($ttl);
+
+                    $saved = $this->cache->save($cacheItem);
+                }
 
                 $this->logger->info('BiConnector.tableList.fromDatabase', [
                     'class' => self::class,
@@ -132,6 +143,8 @@ class BiConnector
                     'cacheSaved' => $saved
                 ]);
             }
+
+            $this->pruneCacheOccasionally();
 
             return new Response(
                 json_encode($tables) ?: '[]',
@@ -165,26 +178,11 @@ class BiConnector
             'tableName' => $tableName
         ]);
 
-        if (empty($tableName)) {
-            $this->logger->warning('BiConnector.tableDescription.emptyTableName', [
-                'class' => self::class,
-                'method' => 'tableDescription'
-            ]);
-
-            return new Response(
-                json_encode(['error' => 'Table name is required']) ?: '{"error":"Table name is required"}',
-                400,
-                ['Content-Type' => 'application/json']
-            );
-        }
-
         try {
-            $cacheKey = 'table_desc_' . md5(
-                json_encode($this->connectionParams) . $this->connectionType . $tableName
-            );
-            $cacheItem = $this->cache->getItem($cacheKey);
+            $cacheKey = $this->buildCacheKey('table_desc_', $tableName);
+            $cacheItem = $cacheKey === null ? null : $this->cache->getItem($cacheKey);
 
-            if ($cacheItem->isHit()) {
+            if ($cacheItem !== null && $cacheItem->isHit()) {
                 $fields = $cacheItem->get();
                 $this->logger->info('BiConnector.tableDescription.fromCache', [
                     'class' => self::class,
@@ -194,15 +192,18 @@ class BiConnector
                     'cacheKey' => $cacheKey
                 ]);
             } else {
-                $connection = $this->getConnection();
-                $fields = $this->fetchTableFields($connection, $tableName);
+                $fields = $this->getDataSource()->describeTable($tableName);
 
                 // Cache for configured time
                 $ttl = (int)($_ENV['CACHE_TTL_TABLE_DESCRIPTION'] ?? 1800);
-                $cacheItem->set($fields);
-                $cacheItem->expiresAfter($ttl);
+                $saved = false;
 
-                $saved = $this->cache->save($cacheItem);
+                if ($cacheItem !== null) {
+                    $cacheItem->set($fields);
+                    $cacheItem->expiresAfter($ttl);
+
+                    $saved = $this->cache->save($cacheItem);
+                }
 
                 $this->logger->info('BiConnector.tableDescription.fromDatabase', [
                     'class' => self::class,
@@ -251,38 +252,29 @@ class BiConnector
             'limit' => $limit
         ]);
 
-        if (empty($tableName)) {
-            $this->logger->warning('BiConnector.getData.emptyTableName', [
-                'class' => self::class,
-                'method' => 'getData'
-            ]);
-
-            return new Response(
-                json_encode(['error' => 'Table name is required']) ?: '{"error":"Table name is required"}',
-                400,
-                ['Content-Type' => 'application/json']
-            );
-        }
+        $filePath = null;
 
         try {
-            $connection = $this->getConnection();
-            $queryBuilder = new QueryBuilder($connection, $this->logger);
-
-            $data = $queryBuilder->buildAndExecuteQuery($tableName, $select, $filter, $limit);
+            $writer = new JsonRowsFileWriter($this->cacheDir);
+            $filePath = $writer->write($this->getDataSource()->fetchData($tableName, $select, $filter, $limit));
 
             $this->logger->info('BiConnector.getData.fromDatabase', [
                 'class' => self::class,
                 'method' => 'getData',
                 'tableName' => $tableName,
-                'rowsCount' => count($data) - 1, // Subtract header row
+                'rowsCount' => $writer->getDataRowCount(),
             ]);
 
-            return new Response(
-                json_encode($data) ?: '[]',
-                200,
-                ['Content-Type' => 'application/json']
-            );
+            $response = new BinaryFileResponse($filePath, 200, ['Content-Type' => 'application/json']);
+            $response->deleteFileAfterSend(true);
+
+            return $response;
         } catch (\Throwable $e) {
+            // No body is served on failure: the partially written file is dropped
+            if ($filePath !== null && is_file($filePath)) {
+                unlink($filePath);
+            }
+
             $this->logger->error('BiConnector.getData.error', [
                 'class' => self::class,
                 'method' => 'getData',
@@ -297,6 +289,48 @@ class BiConnector
                 ['Content-Type' => 'application/json']
             );
         }
+    }
+
+    /**
+     * Key of a cache entry, or null when the parameters of the connection cannot be encoded.
+     *
+     * The encoding is not allowed to fail quietly: json_encode() answers false on a broken UTF-8 sequence,
+     * false becomes an empty string inside the concatenation, and the key stops depending on the address
+     * and the credentials of the connection, so two connections would share one entry. Substituting the
+     * broken sequences keeps the key of a well formed set of parameters exactly as it was.
+     */
+    private function buildCacheKey(string $prefix, string $suffix): ?string
+    {
+        $encodedParams = json_encode($this->connectionParams, JSON_INVALID_UTF8_SUBSTITUTE);
+
+        if ($encodedParams === false) {
+            $this->logger->warning('BiConnector.buildCacheKey.notEncodable', [
+                'class' => self::class,
+                'method' => 'buildCacheKey',
+                'prefix' => $prefix,
+                'message' => json_last_error_msg()
+            ]);
+
+            return null;
+        }
+
+        return $prefix . md5($encodedParams . $this->connectionType . $suffix);
+    }
+
+    /**
+     * Removes the expired entries of the catalogue cache on a small share of the requests.
+     *
+     * A probability that is not positive switches the sweep off.
+     */
+    private function pruneCacheOccasionally(): void
+    {
+        $probability = (int)($_ENV['CACHE_PRUNE_PROBABILITY'] ?? self::DEFAULT_CACHE_PRUNE_PROBABILITY);
+
+        if ($probability <= 0 || random_int(1, $probability) !== 1) {
+            return;
+        }
+
+        $this->cache->prune();
     }
 
     /**
@@ -343,232 +377,10 @@ class BiConnector
     }
 
     /**
-     * Get database connection
+     * Get the data source serving the configured connection type
      */
-    private function getConnection(): Connection
+    private function getDataSource(): DataSourceInterface
     {
-        if ($this->connection === null) {
-            $this->logger->debug('BiConnector.getConnection.creating', [
-                'class' => self::class,
-                'method' => 'getConnection'
-            ]);
-
-            $dsn = $this->buildDsn($this->connectionType);
-
-            $connectionParams = [
-                'url' => $dsn,
-                'driverOptions' => [
-                    \PDO::ATTR_TIMEOUT => (int)($_ENV['DB_CONNECTION_TIMEOUT'] ?? 30),
-                    \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-                ]
-            ];
-
-            $this->connection = DriverManager::getConnection($connectionParams);
-
-            $this->logger->info('BiConnector.getConnection.created', [
-                'class' => self::class,
-                'method' => 'getConnection',
-                'connectionType' => $this->connectionType
-            ]);
-        }
-
-        return $this->connection;
-    }
-
-    /**
-     * Build DSN string based on connection type
-     */
-    private function buildDsn(string $connectionType): string
-    {
-        $host = $this->connectionParams['host'] ?? 'localhost';
-        $database = $this->connectionParams['database'] ?? '';
-        $username = $this->connectionParams['username'] ?? '';
-        $password = $this->connectionParams['password'] ?? '';
-
-        return match ($connectionType) {
-            'mysql' => sprintf(
-                'mysql://%s:%s@%s:%s/%s',
-                urlencode($username),
-                urlencode($password),
-                $host,
-                $this->connectionParams['port'] ?? '3306',
-                $database
-            ),
-            'postgresql' => sprintf(
-                'postgresql://%s:%s@%s:%s/%s',
-                urlencode($username),
-                urlencode($password),
-                $host,
-                $this->connectionParams['port'] ?? '5432',
-                $database
-            ),
-            default => throw new \InvalidArgumentException('Unsupported connection type: ' . $connectionType)
-        };
-    }
-
-    /**
-     * Fetch tables from database
-     */
-    private function fetchTables(Connection $connection, string $searchString): array
-    {
-        $this->logger->debug('BiConnector.fetchTables.start', [
-            'class' => self::class,
-            'method' => 'fetchTables',
-            'searchString' => $searchString
-        ]);
-
-        if ($this->connectionType === 'mysql') {
-            $sql = "SHOW TABLES";
-            if (!empty($searchString)) {
-                $sql .= " LIKE :search";
-            }
-        } else { // PostgreSQL
-            $sql = "SELECT tablename as table_name FROM pg_tables WHERE schemaname = 'public'";
-            if (!empty($searchString)) {
-                $sql .= " AND tablename LIKE :search";
-            }
-        }
-
-        $stmt = $connection->prepare($sql);
-
-        if (!empty($searchString)) {
-            $stmt->bindValue('search', '%' . $searchString . '%');
-        }
-
-        $result = $stmt->executeQuery();
-        $tables = [];
-
-        while ($row = $result->fetchAssociative()) {
-            $tableName = $this->connectionType === 'mysql'
-                ? array_values($row)[0]
-                : $row['table_name'];
-
-            $tables[] = [
-                'code' => $tableName,
-                'title' => $tableName
-            ];
-        }
-
-        $this->logger->info('BiConnector.fetchTables.success', [
-            'class' => self::class,
-            'method' => 'fetchTables',
-            'tablesFound' => count($tables)
-        ]);
-
-        return $tables;
-    }
-
-    /**
-     * Fetch table fields information
-     */
-    private function fetchTableFields(Connection $connection, string $tableName): array
-    {
-        $this->logger->debug('BiConnector.fetchTableFields.start', [
-            'class' => self::class,
-            'method' => 'fetchTableFields',
-            'tableName' => $tableName
-        ]);
-
-        if ($this->connectionType === 'mysql') {
-            $sql = "DESCRIBE `{$tableName}`";
-        } else { // PostgreSQL
-            $sql = "SELECT column_name, data_type, is_nullable 
-                   FROM information_schema.columns 
-                   WHERE table_name = :table_name 
-                   AND table_schema = 'public'";
-        }
-
-        $stmt = $connection->prepare($sql);
-
-        if ($this->connectionType === 'postgresql') {
-            $stmt->bindValue('table_name', $tableName);
-        }
-
-        $result = $stmt->executeQuery();
-        $fields = [];
-
-        while ($row = $result->fetchAssociative()) {
-            if ($this->connectionType === 'mysql') {
-                $fields[] = [
-                    'code' => $row['Field'],
-                    'name' => $row['Field'],
-                    'type' => $this->mapMySQLTypeToBitrix($row['Type'])
-                ];
-            } else { // PostgreSQL
-                $fields[] = [
-                    'code' => $row['column_name'],
-                    'name' => $row['column_name'],
-                    'type' => $this->mapPostgreSQLTypeToBitrix($row['data_type'])
-                ];
-            }
-        }
-
-        $this->logger->info('BiConnector.fetchTableFields.success', [
-            'class' => self::class,
-            'method' => 'fetchTableFields',
-            'tableName' => $tableName,
-            'fieldsFound' => count($fields)
-        ]);
-
-        return $fields;
-    }
-
-    /**
-     * Map MySQL data types to Bitrix24 BI Connector types
-     */
-    private function mapMySQLTypeToBitrix(string $mysqlType): string
-    {
-        $mysqlType = strtolower($mysqlType);
-
-        if (
-            str_contains($mysqlType, 'int') || str_contains($mysqlType, 'tinyint') ||
-            str_contains($mysqlType, 'smallint') || str_contains($mysqlType, 'mediumint') ||
-            str_contains($mysqlType, 'bigint')
-        ) {
-            return 'int';
-        }
-
-        if (
-            str_contains($mysqlType, 'float') || str_contains($mysqlType, 'double') ||
-            str_contains($mysqlType, 'decimal') || str_contains($mysqlType, 'numeric')
-        ) {
-            return 'double';
-        }
-
-        if (str_contains($mysqlType, 'date') && !str_contains($mysqlType, 'time')) {
-            return 'date';
-        }
-
-        if (str_contains($mysqlType, 'datetime') || str_contains($mysqlType, 'timestamp')) {
-            return 'datetime';
-        }
-
-        return 'string';
-    }
-
-    /**
-     * Map PostgreSQL data types to Bitrix24 BI Connector types
-     */
-    private function mapPostgreSQLTypeToBitrix(string $pgType): string
-    {
-        $pgType = strtolower($pgType);
-
-        if (in_array($pgType, ['integer', 'bigint', 'smallint', 'serial', 'bigserial'])) {
-            return 'int';
-        }
-
-        if (in_array($pgType, ['real', 'double precision', 'numeric', 'decimal'])) {
-            return 'double';
-        }
-
-        if ($pgType === 'date') {
-            return 'date';
-        }
-
-        if (in_array($pgType, ['timestamp', 'timestamp with time zone', 'timestamp without time zone'])) {
-            return 'datetime';
-        }
-
-        return 'string';
+        return $this->dataSource ??= $this->dataSourceFactory->create($this->connectionType, $this->connectionParams);
     }
 }

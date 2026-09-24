@@ -1,10 +1,10 @@
 # Bitrix24 BI Connector Extension
 
-A serverless application for Bitrix24 that extends the capabilities of the built-in BI Connector with support for MySQL and PostgreSQL databases. This application integrates with Bitrix24's BI Constructor through REST API methods to provide external database connectivity.
+A serverless application for Bitrix24 that extends the capabilities of the built-in BI Connector with support for MySQL, PostgreSQL and ClickHouse databases. This application integrates with Bitrix24's BI Constructor through REST API methods to provide external database connectivity.
 
 ## Features
 
-- **Multi-Database Support**: Connect to MySQL and PostgreSQL databases
+- **Multi-Database Support**: Connect to MySQL, PostgreSQL and ClickHouse databases
 - **Connection Management**: Automatic connection validation and availability checks
 - **Dynamic Table Discovery**: Search and retrieve table lists from external databases
 - **Field Structure Analysis**: Get complete table schema information with data types
@@ -31,6 +31,42 @@ Database table fields must adhere to the following rules:
 - ❌ Invalid: `user_id`, `created-at`, `2024_total`, `données_client`
 
 > ⚠️ **Critical**: Failure to follow these naming conventions will result in dataset creation errors and connection failures.
+
+## Data Source Requirements
+
+### Database Account
+The application only reads from the source database. **Use an account with read-only privileges** for the
+connection settings stored in Bitrix24: the application never writes, never changes the schema and needs no
+administrative rights. A restricted account keeps the source data unaffected if the connection settings ever
+leak.
+
+### Supported ClickHouse Versions
+The minimum supported version is **ClickHouse 24.8**. It is the version the integration test suite runs
+against (`clickhouse/clickhouse-server:24.8-alpine` in `docker-compose.yml`); earlier versions are not
+tested. Boolean values are reported as `true` and `false` only for columns declared `Bool` or `Boolean`. On
+servers that store a boolean value in a `UInt8` column, the value is reported as an integer, because the
+column metadata does not tell a boolean carrier from a small integer.
+
+### ClickHouse Connection Address
+The `host` setting of a ClickHouse connection may carry a scheme, a port and a path of its own, because the
+HTTP interface of a source is commonly published behind a proxy under a path prefix. The path is kept, so
+`https://analytics.example.com/clickhouse` reaches the interface published under that prefix. The port is
+taken from the address first and from the separate `port` setting afterwards -- the more specific of the two
+wins -- and the default of the scheme applies when neither names one: 8123 for `http`, 8443 for `https`.
+Neither the user name nor the password is ever placed in the address: both travel as headers.
+
+### Failures ClickHouse Appends to an Answer
+A statement can fail after the server has already begun sending its answer. Such a failure arrives inside a
+body that carries a successful status, and the transport gives no sign of it: no distinct status code and no
+`X-ClickHouse-Exception-Code` header. The reader therefore recognises the failure by the answer itself and
+reports it instead of handing a truncated result to the portal.
+
+There is one case it cannot tell apart. Under a header of more than one column a line holding a single value
+is no data row and always ends the reading. Under a header of exactly one column an appended failure has the
+same width as a data row, so the reading falls back to the display text of a ClickHouse exception: a
+single-column answer whose values are themselves such texts -- a table of stored log messages, for instance
+-- ends with that value reported as a failure. Selecting an additional column, `SELECT id, message`, removes
+the ambiguity.
 
 ## Installation
 
@@ -64,7 +100,23 @@ Database table fields must adhere to the following rules:
 
 4. **Install on Bitrix24**:
    - Upload application to your Bitrix24 portal
-   - The application will automatically register MySQL and PostgreSQL connectors
+   - The application will automatically register the MySQL, PostgreSQL and ClickHouse connectors
+
+## Version Compatibility
+
+The application and the `biconnector` module of the portal are updated independently, so the two directions
+differ.
+
+**A newer application works with any version of the module.** Before it changes the connector catalogue, the
+application asks the portal which fields it accepts (`biconnector.connector.fields`) and sends only those. A
+portal that does not know the `sourceCode` field is registered without it, and the MySQL and PostgreSQL
+connectors keep working as before. The log records the set of fields actually sent, under
+`Application.registerConnectors.portalFieldSet` for the full set and
+`Application.registerConnectors.portalFieldSetDegraded` for the reduced one.
+
+**The ClickHouse connection type requires this version of the application or newer.** An older application
+rejects `connection_type=clickhouse` with an error listing the connection types it supports, whatever the
+version of the module on the portal is. If a ClickHouse connection fails that way, update the application.
 
 ## Configuration
 
@@ -81,6 +133,7 @@ Configure the application through the `.env` file:
 | `CACHE_TTL_TABLE_LIST` | Table list cache duration (seconds) | `3600` |
 | `CACHE_TTL_TABLE_DESCRIPTION` | Table structure cache duration (seconds) | `3600` |
 | `DB_CONNECTION_TIMEOUT` | Database connection timeout (seconds) | `30` |
+| `MAX_RESULT_ROWS` | Upper bound on the rows one answer may carry | `500000` |
 
 ### Bitrix24 Application Settings
 Required for REST API integration:
@@ -216,6 +269,11 @@ The application provides four main endpoints that are called by Bitrix24:
 ]
 ```
 
+The `limit` of the request is bounded by `MAX_RESULT_ROWS`. A request asking for more rows than that is
+refused with HTTP 500 and a body naming both numbers; it is not silently shortened, because an answer cut
+down to the bound carries no sign of being incomplete and would be taken for the whole of the data. A
+request naming no limit, or a limit that is not positive, is served with the bound of the application.
+
 ## Architecture
 
 ### Core Components
@@ -230,7 +288,7 @@ The application provides four main endpoints that are called by Bitrix24:
 
 - **Runtime**: PHP 8.4+ with FrankenPHP server
 - **SDK**: Bitrix24 PHP SDK 1.7.0+
-- **Database**: Doctrine DBAL for MySQL and PostgreSQL
+- **Database**: Doctrine DBAL for MySQL and PostgreSQL, HTTP interface for ClickHouse
 - **Caching**: Symfony Cache Component
 - **Logging**: Monolog with rotation support
 - **Testing**: PHPUnit with coverage reporting
@@ -239,7 +297,7 @@ The application provides four main endpoints that are called by Bitrix24:
 ### Application Flow
 
 1. **Installation**: User installs app on Bitrix24 portal
-2. **Connector Registration**: App registers MySQL and PostgreSQL connectors via REST API
+2. **Connector Registration**: App registers the MySQL, PostgreSQL and ClickHouse connectors via REST API
 3. **Connection Setup**: User configures database connection parameters in Bitrix24
 4. **Data Access**: Bitrix24 makes requests to app endpoints for data retrieval
 5. **Response Processing**: App processes requests and returns formatted JSON responses

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App;
 
+use App\DataSource\RowLimit;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Query\QueryBuilder as DBALQueryBuilder;
 use Psr\Log\LoggerInterface;
@@ -12,11 +13,13 @@ class QueryBuilder
 {
     private Connection $connection;
     private LoggerInterface $logger;
+    private RowLimit $rowLimit;
 
-    public function __construct(Connection $connection, LoggerInterface $logger)
+    public function __construct(Connection $connection, LoggerInterface $logger, ?RowLimit $rowLimit = null)
     {
         $this->connection = $connection;
         $this->logger = $logger;
+        $this->rowLimit = $rowLimit ?? RowLimit::fromEnvironment();
 
         $this->logger->debug('QueryBuilder.__construct', [
             'class' => self::class,
@@ -25,9 +28,16 @@ class QueryBuilder
     }
 
     /**
-     * Build and execute SQL query with filters, select fields and limit
+     * Build and execute SQL query with filters, select fields and limit.
+     *
+     * Rows are delivered one by one: the column-name row first, then one row per record.
+     *
+     * @param array<int, string> $select
+     * @param array<string, mixed> $filter
+     *
+     * @return \Generator<int, list<scalar|null>>
      */
-    public function buildAndExecuteQuery(string $tableName, array $select, array $filter, int $limit): array
+    public function buildAndExecuteQuery(string $tableName, array $select, array $filter, int $limit): \Generator
     {
         $this->logger->debug('QueryBuilder.buildAndExecuteQuery.start', [
             'class' => self::class,
@@ -63,10 +73,10 @@ class QueryBuilder
         // Apply filters
         $this->applyFilters($queryBuilder, $filter);
 
-        // Apply limit
-        if ($limit > 0) {
-            $queryBuilder->setMaxResults($limit);
-        }
+        // Apply limit. The driver collects the whole result before the first row is read, so the bound of
+        // the application is applied to every statement: a limit that is not positive means that bound and
+        // not the absence of one, and a limit above it is refused instead of being lowered silently.
+        $queryBuilder->setMaxResults($this->rowLimit->resolve($limit));
 
         $sql = $queryBuilder->getSQL();
         $parameters = $queryBuilder->getParameters();
@@ -79,18 +89,24 @@ class QueryBuilder
         ]);
 
         $result = $queryBuilder->executeQuery();
-        $rows = $result->fetchAllAssociative();
+        $emittedRows = 0;
 
         // Format data according to Bitrix24 BI Connector format
-        $formattedData = $this->formatDataForBitrix($rows, $select);
+        try {
+            foreach ($this->formatDataForBitrix($result->iterateAssociative(), $select) as $formattedRow) {
+                $emittedRows++;
 
-        $this->logger->info('QueryBuilder.buildAndExecuteQuery.success', [
-            'class' => self::class,
-            'method' => 'buildAndExecuteQuery',
-            'rowsReturned' => count($rows)
-        ]);
+                yield $formattedRow;
+            }
 
-        return $formattedData;
+            $this->logger->info('QueryBuilder.buildAndExecuteQuery.success', [
+                'class' => self::class,
+                'method' => 'buildAndExecuteQuery',
+                'rowsReturned' => max(0, $emittedRows - 1)
+            ]);
+        } finally {
+            $result->free();
+        }
     }
 
     /**
@@ -249,48 +265,54 @@ class QueryBuilder
 
     /**
      * Format data according to Bitrix24 BI Connector format
+     *
+     * @param iterable<array<string, mixed>> $rows
+     * @param array<int, string> $select
+     *
+     * @return \Generator<int, list<scalar|null>>
      */
-    private function formatDataForBitrix(array $rows, array $select): array
+    private function formatDataForBitrix(iterable $rows, array $select): \Generator
     {
         $this->logger->debug('QueryBuilder.formatDataForBitrix.start', [
             'class' => self::class,
             'method' => 'formatDataForBitrix',
-            'rowsCount' => count($rows),
             'selectFields' => $select
         ]);
 
-        if (empty($rows)) {
-            return [];
-        }
+        $fieldNames = null;
+        $dataRowsCount = 0;
 
-        // Get field names from first row
-        $fieldNames = array_keys($rows[0]);
-
-        // If specific fields were selected, use those, otherwise use all fields
-        if (!empty($select)) {
-            $fieldNames = array_intersect($select, $fieldNames);
-        }
-
-        // Start with header row containing field names
-        $result = [$fieldNames];
-
-        // Add data rows
         foreach ($rows as $row) {
+            if ($fieldNames === null) {
+                // Get field names from first row
+                $fieldNames = array_keys($row);
+
+                // If specific fields were selected, use those, otherwise use all fields
+                if (!empty($select)) {
+                    $fieldNames = array_values(array_intersect($select, $fieldNames));
+                }
+
+                // Start with header row containing field names
+                yield $fieldNames;
+            }
+
             $dataRow = [];
             foreach ($fieldNames as $fieldName) {
-                $dataRow[] = $row[$fieldName] ?? null;
+                $value = $row[$fieldName] ?? null;
+                $dataRow[] = is_scalar($value) ? $value : null;
             }
-            $result[] = $dataRow;
+
+            $dataRowsCount++;
+
+            yield $dataRow;
         }
 
         $this->logger->info('QueryBuilder.formatDataForBitrix.success', [
             'class' => self::class,
             'method' => 'formatDataForBitrix',
-            'fieldsCount' => count($fieldNames),
-            'dataRowsCount' => count($result) - 1
+            'fieldsCount' => $fieldNames === null ? 0 : count($fieldNames),
+            'dataRowsCount' => $dataRowsCount
         ]);
-
-        return $result;
     }
 
     /**

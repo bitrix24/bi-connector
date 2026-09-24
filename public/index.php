@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
+use App\DataSource\ConnectionType;
+use App\Validation\NameValidator;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -15,10 +17,8 @@ $input = $request->request->all() ?: [];
 $action = $request->query->get('action', '');
 $connectionType = $request->query->get('connection_type', '');
 
+// The request body carries connection credentials and never reaches the log
 Application::getLog()->debug('index.init', [
-    'request' => $request->request->all(),
-    'query' => $request->query->all(),
-    'input' => $input,
     'action' => $action,
     'connectionType' => $connectionType,
     'method' => $request->getMethod(),
@@ -39,25 +39,46 @@ try {
     // Validate connection type
     if (
         in_array($action, ['check', 'table_list', 'table_description', 'data']) &&
-        !in_array($connectionType, ['mysql', 'postgresql'])
+        ConnectionType::tryFrom(is_string($connectionType) ? $connectionType : '') === null
     ) {
-        throw new \InvalidArgumentException(
-            'Valid connection_type (mysql or postgresql) is required for action: ' . $action
-        );
+        throw new \InvalidArgumentException(sprintf(
+            'Valid connection_type (%s) is required for action: %s',
+            implode(', ', ConnectionType::values()),
+            $action
+        ));
+    }
+
+    // Table and field names come from outside and end up in SQL: the only place where they are validated
+    $nameValidator = new NameValidator();
+
+    if (in_array($action, ['table_description', 'data'])) {
+        $nameValidator->validateTableName($input['table'] ?? '');
+    }
+
+    if ($action === 'data') {
+        $nameValidator->validateFieldNames($input['select'] ?? []);
+
+        $filter = $input['filter'] ?? [];
+
+        if (!is_array($filter)) {
+            throw new \InvalidArgumentException('Filter must be an array keyed by field names');
+        }
+
+        $nameValidator->validateFieldNames(array_keys($filter));
     }
 
     $connector = new BiConnector($input['connection'] ?? [], $connectionType, Application::getLog());
 
     switch ($action) {
         case 'check':
-            Application::getLog()->info('BiConnector.check.start', ['connection' => $input['connection'] ?? []]);
+            Application::getLog()->info('BiConnector.check.start', ['connectionType' => $connectionType]);
             $response = $connector->check();
             break;
 
         case 'table_list':
             Application::getLog()->info('BiConnector.tableList.start', [
                 'searchString' => $input['searchString'] ?? '',
-                'connection' => $input['connection'] ?? []
+                'connectionType' => $connectionType
             ]);
             $response = $connector->tableList($input['searchString'] ?? '');
             break;
@@ -65,7 +86,7 @@ try {
         case 'table_description':
             Application::getLog()->info('BiConnector.tableDescription.start', [
                 'table' => $input['table'] ?? '',
-                'connection' => $input['connection'] ?? []
+                'connectionType' => $connectionType
             ]);
             $response = $connector->tableDescription($input['table'] ?? '');
             break;
@@ -76,7 +97,7 @@ try {
                 'select' => $input['select'] ?? [],
                 'filter' => $input['filter'] ?? [],
                 'limit' => $input['limit'] ?? 100,
-                'connection' => $input['connection'] ?? []
+                'connectionType' => $connectionType
             ]);
             $response = $connector->getData(
                 $input['table'] ?? '',
